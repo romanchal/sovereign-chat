@@ -40,6 +40,18 @@ models:
   #     temperature: 0.3
   #     num_ctx: 8192
 
+  # Embedding model for RAG ingest + retrieval. Small, CPU-friendly,
+  # stays resident permanently so document search never triggers a swap.
+  # Pull once on the demo box:
+  #   ollama pull nomic-embed-text
+  - id: embed
+    ollama_tag: nomic-embed-text
+    label: Nomic Embed Text
+    role: Document embeddings for RAG
+    vram_gb: 0.3
+    resident: true
+    options: {}
+
 # Fallback used when the classifier has no strong signal.
 default_model: reasoning
 

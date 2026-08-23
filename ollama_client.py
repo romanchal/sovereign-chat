@@ -93,6 +93,19 @@ class OllamaClient:
             results.append({"tag": tag, **info})
         return results
 
+    # ------------------------------------------------------------------ embed
+
+    async def embed(self, tag: str, texts: list[str]) -> list[list[float]]:
+        """Batch-embed via Ollama /api/embed. Returns one vector per input."""
+        if not texts:
+            return []
+        payload = {"model": tag, "input": texts, "keep_alive": KEEP_ALIVE}
+        async with httpx.AsyncClient(timeout=None) as c:
+            r = await c.post(f"{self.base_url}/api/embed", json=payload)
+            r.raise_for_status()
+            data = r.json()
+        return data.get("embeddings") or []
+
     # ------------------------------------------------------------------ chat
 
     async def chat_once(

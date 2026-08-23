@@ -141,6 +141,16 @@ Then: "Summarise what a P&amp;ID is for a new engineer"</div>
       <h2>Last response</h2>
       <div id="stats"><div class="muted">no run yet</div></div>
     </div>
+
+    <div class="card">
+      <h2>Knowledge base</h2>
+      <div id="docs"><div class="muted">no documents</div></div>
+      <div style="display:flex;gap:.4rem;margin-top:.55rem">
+        <input type="file" id="upload" accept=".pdf,.txt,.md,.docx,.xlsx,.pptx" style="display:none">
+        <button class="ghost" id="uploadBtn" style="flex:1">+ Ingest file</button>
+      </div>
+      <div class="muted" id="uploadStatus" style="margin-top:.35rem"></div>
+    </div>
   </aside>
 </div>
 
@@ -293,7 +303,40 @@ $('warm').addEventListener('click', async ()=>{
   refreshLoaded();
 });
 
-refreshEgress(); refreshLoaded(); refreshReg();
+async function refreshDocs(){
+  try{
+    const d = await (await fetch('/api/documents')).json();
+    const box = $('docs');
+    if(!d.documents.length){ box.innerHTML = '<div class="muted">no documents</div>'; return; }
+    box.innerHTML = d.documents.slice(0,8).map(x=>{
+      const size = x.bytes>1e6 ? (x.bytes/1e6).toFixed(1)+' MB' : Math.round(x.bytes/1024)+' KB';
+      return '<div class="row"><span title="'+x.filename+'">'+
+        (x.filename.length>22 ? x.filename.slice(0,20)+'…' : x.filename)+
+        '</span><span>'+x.chunks+' ch · '+size+'</span></div>';
+    }).join('') + '<div class="muted" style="margin-top:.3rem">total chunks: '+d.chunk_count+'</div>';
+  }catch{}
+}
+
+$('uploadBtn').addEventListener('click', ()=> $('upload').click());
+$('upload').addEventListener('change', async e => {
+  const f = e.target.files[0]; if(!f) return;
+  const status = $('uploadStatus');
+  status.textContent = 'ingesting '+f.name+'…';
+  $('uploadBtn').disabled = true;
+  try{
+    const body = new FormData(); body.append('file', f);
+    const r = await fetch('/api/ingest', {method:'POST', body});
+    const d = await r.json();
+    if(!r.ok){ status.textContent = 'error: '+(d.detail||r.status); }
+    else if(d.reused){ status.textContent = 'already ingested ('+d.doc_id+')'; }
+    else { status.textContent = 'ingested '+d.chunks+' chunks from '+d.pages+' pages'; }
+    refreshDocs();
+  }catch(err){ status.textContent = 'error: '+err.message; }
+  $('uploadBtn').disabled = false;
+  $('upload').value = '';
+});
+
+refreshEgress(); refreshLoaded(); refreshReg(); refreshDocs();
 setInterval(refreshEgress, 3000);
 setInterval(refreshLoaded, 8000);
 </script>

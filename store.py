@@ -1,0 +1,176 @@
+"""
+LanceDB-backed vector + metadata store for RAG chunks.
+
+Everything lives on disk under data/index/. Sovereign by construction:
+no server process, no network, no cloud bucket. Deleting data/index/
+resets the corpus.
+
+Retrieval lives in Phase 3b; this module just writes and lists for now.
+"""
+from __future__ import annotations
+
+import hashlib
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+import lancedb
+import pyarrow as pa
+
+BASE = Path(__file__).parent
+INDEX_DIR = BASE / "data" / "index"
+UPLOADS_DIR = BASE / "data" / "uploads"
+CHUNKS_TABLE = "chunks"
+DOCS_TABLE = "documents"
+
+
+@dataclass
+class ChunkRow:
+    id: str
+    doc_id: str
+    ordinal: int
+    page: int
+    text: str
+    vector: list[float] = field(default_factory=list)
+
+
+def _ensure_dirs() -> None:
+    INDEX_DIR.mkdir(parents=True, exist_ok=True)
+    UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _chunks_schema(dim: int) -> pa.Schema:
+    return pa.schema([
+        pa.field("id", pa.string()),
+        pa.field("doc_id", pa.string()),
+        pa.field("ordinal", pa.int32()),
+        pa.field("page", pa.int32()),
+        pa.field("text", pa.string()),
+        pa.field("vector", pa.list_(pa.float32(), list_size=dim)),
+    ])
+
+
+def _docs_schema() -> pa.Schema:
+    return pa.schema([
+        pa.field("doc_id", pa.string()),
+        pa.field("filename", pa.string()),
+        pa.field("mime", pa.string()),
+        pa.field("bytes", pa.int64()),
+        pa.field("pages", pa.int32()),
+        pa.field("chunks", pa.int32()),
+        pa.field("ingested_at", pa.float64()),
+        pa.field("path", pa.string()),
+    ])
+
+
+class Store:
+    def __init__(self) -> None:
+        _ensure_dirs()
+        self.db = lancedb.connect(str(INDEX_DIR))
+        self._chunks_dim: int | None = None
+        self._chunks = None
+        if CHUNKS_TABLE in self.db.table_names():
+            self._chunks = self.db.open_table(CHUNKS_TABLE)
+            # Infer dim from existing schema so a restart matches ingested data.
+            for f in self._chunks.schema:
+                if f.name == "vector" and isinstance(f.type, pa.FixedSizeListType):
+                    self._chunks_dim = f.type.list_size
+                    break
+        if DOCS_TABLE in self.db.table_names():
+            self._docs = self.db.open_table(DOCS_TABLE)
+        else:
+            self._docs = self.db.create_table(DOCS_TABLE, schema=_docs_schema())
+
+    # ------------------------------------------------------------------ ids
+
+    @staticmethod
+    def doc_id_for(path: Path, content: bytes) -> str:
+        """Stable id: sha256 of file content, first 16 hex chars."""
+        return hashlib.sha256(content).hexdigest()[:16]
+
+    @staticmethod
+    def chunk_id(doc_id: str, ordinal: int) -> str:
+        return f"{doc_id}:{ordinal}"
+
+    # ------------------------------------------------------------------ writes
+
+    def _ensure_chunks_table(self, dim: int) -> None:
+        if self._chunks is not None and self._chunks_dim == dim:
+            return
+        if self._chunks is not None and self._chunks_dim != dim:
+            raise ValueError(
+                f"vector dim mismatch: table has {self._chunks_dim}, ingest gave {dim}"
+            )
+        self._chunks = self.db.create_table(CHUNKS_TABLE, schema=_chunks_schema(dim))
+        self._chunks_dim = dim
+
+    def has_doc(self, doc_id: str) -> bool:
+        try:
+            hit = self._docs.search().where(f"doc_id = '{doc_id}'").limit(1).to_list()
+            return bool(hit)
+        except Exception:
+            return False
+
+    def add_document(
+        self,
+        doc_id: str,
+        filename: str,
+        mime: str,
+        size_bytes: int,
+        pages: int,
+        chunk_count: int,
+        stored_path: Path,
+    ) -> None:
+        self._docs.add([{
+            "doc_id": doc_id,
+            "filename": filename,
+            "mime": mime,
+            "bytes": size_bytes,
+            "pages": pages,
+            "chunks": chunk_count,
+            "ingested_at": time.time(),
+            "path": str(stored_path),
+        }])
+
+    def add_chunks(self, rows: list[ChunkRow]) -> None:
+        if not rows:
+            return
+        dim = len(rows[0].vector)
+        if dim == 0:
+            raise ValueError("empty vector in chunk row")
+        self._ensure_chunks_table(dim)
+        self._chunks.add([{
+            "id": r.id,
+            "doc_id": r.doc_id,
+            "ordinal": r.ordinal,
+            "page": r.page,
+            "text": r.text,
+            "vector": r.vector,
+        } for r in rows])
+
+    # ------------------------------------------------------------------ reads
+
+    def list_documents(self) -> list[dict[str, Any]]:
+        try:
+            rows = self._docs.search().limit(1000).to_list()
+        except Exception:
+            return []
+        rows.sort(key=lambda r: r.get("ingested_at", 0), reverse=True)
+        return [{
+            "doc_id": r["doc_id"],
+            "filename": r["filename"],
+            "mime": r["mime"],
+            "bytes": r["bytes"],
+            "pages": r["pages"],
+            "chunks": r["chunks"],
+            "ingested_at": r["ingested_at"],
+        } for r in rows]
+
+    def chunk_count(self) -> int:
+        if self._chunks is None:
+            return 0
+        try:
+            return self._chunks.count_rows()
+        except Exception:
+            return 0

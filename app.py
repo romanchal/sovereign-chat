@@ -13,17 +13,19 @@ import re
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.responses import StreamingResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 import egress
+import ingest as ingest_mod
 from audit import AuditLogger
 from ollama_client import OllamaClient
 from registry import Registry
 from router import Router
 from sandbox import SandboxExecutor, get_tools_schema
+from store import ChunkRow, Store, UPLOADS_DIR
 
 BASE = Path(__file__).parent
 
@@ -34,6 +36,10 @@ router = Router(registry)
 ollama = OllamaClient()
 sandbox = SandboxExecutor()
 audit = AuditLogger()
+store = Store()
+
+EMBED_MODEL_ID = "embed"
+EMBED_BATCH = 32
 
 SYSTEM_PROMPT = (
     "You are an on-premise assistant for an industrial refinery. "
@@ -95,6 +101,74 @@ async def warm() -> dict[str, Any]:
 async def reload_registry() -> dict[str, Any]:
     registry.reload()
     return {"registry": registry.as_list()}
+
+
+@app.get("/api/documents")
+async def list_documents() -> dict[str, Any]:
+    return {"documents": store.list_documents(), "chunk_count": store.chunk_count()}
+
+
+@app.post("/api/ingest")
+async def ingest_file(file: UploadFile = File(...)) -> dict[str, Any]:
+    """Read a file, chunk it, embed with nomic-embed-text, persist to LanceDB."""
+    if not registry.has(EMBED_MODEL_ID):
+        raise HTTPException(500, f"embed model '{EMBED_MODEL_ID}' not in registry")
+    embed_spec = registry.get(EMBED_MODEL_ID)
+
+    filename = Path(file.filename or "unnamed").name
+    ext = Path(filename).suffix.lower()
+    if ext not in ingest_mod.SUPPORTED_EXTS:
+        raise HTTPException(415, f"unsupported file type: {ext or 'unknown'}")
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(400, "empty file")
+
+    doc_id = store.doc_id_for(Path(filename), content)
+    stored = UPLOADS_DIR / f"{doc_id}_{filename}"
+    stored.write_bytes(content)
+
+    if store.has_doc(doc_id):
+        return {
+            "doc_id": doc_id, "filename": filename, "reused": True,
+            "chunks": 0, "pages": 0,
+        }
+
+    try:
+        chunks, mime, pages = ingest_mod.chunks_for(stored)
+    except Exception as exc:
+        raise HTTPException(422, f"extraction failed: {exc}")
+
+    if not chunks:
+        raise HTTPException(422, "no extractable text in file")
+
+    # Embed in batches to keep the request finite even for large PDFs.
+    rows: list[ChunkRow] = []
+    for i in range(0, len(chunks), EMBED_BATCH):
+        batch = chunks[i : i + EMBED_BATCH]
+        vectors = await ollama.embed(embed_spec.ollama_tag, [c.text for c in batch])
+        if len(vectors) != len(batch):
+            raise HTTPException(500, "embedding count mismatch from ollama")
+        for c, v in zip(batch, vectors):
+            rows.append(ChunkRow(
+                id=store.chunk_id(doc_id, c.ordinal),
+                doc_id=doc_id, ordinal=c.ordinal, page=c.page,
+                text=c.text, vector=v,
+            ))
+
+    store.add_chunks(rows)
+    store.add_document(
+        doc_id=doc_id, filename=filename, mime=mime,
+        size_bytes=len(content), pages=pages, chunk_count=len(rows),
+        stored_path=stored,
+    )
+    audit.log(embed_spec.ollama_tag, filename, "ingest", {
+        "doc_id": doc_id, "chunks": len(rows), "pages": pages,
+    })
+    return {
+        "doc_id": doc_id, "filename": filename, "reused": False,
+        "chunks": len(rows), "pages": pages, "mime": mime,
+    }
 
 
 def _extract_code(msg: dict[str, Any]) -> tuple[str | None, str, bool]:
