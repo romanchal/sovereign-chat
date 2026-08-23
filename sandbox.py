@@ -1,29 +1,22 @@
 """
 Docker sandbox — the agent's only path to executing generated code.
 
-`--network=none` is the point. Even if the model writes `urllib.request.urlopen`,
-the container has no route out. This is what lets the agent run untrusted
-code without breaking the sovereignty claim.
+Uses the `docker` CLI via subprocess rather than the `docker` Python SDK
+so we avoid the Windows named-pipe dependency (pywin32/pypiwin32), which
+breaks on Python 3.14 today. The CLI ships with Docker Desktop and is
+the same tool the user already relies on.
 
-Import-guarded: on machines without Docker (the build laptop), the module
-still imports and `available` reports False, so the app can boot and the
-non-agent paths keep working.
+`--network=none` is the whole point. Even if the model writes
+`urllib.request.urlopen`, the container has no route out. That is what
+lets us run untrusted code without breaking the sovereignty claim.
 """
 from __future__ import annotations
 
+import shutil
+import subprocess
 from typing import Any
 
 from pydantic import BaseModel, Field
-
-try:
-    import docker  # type: ignore
-    from docker.errors import ContainerError, DockerException  # type: ignore
-    _DOCKER_IMPORT_ERROR: str | None = None
-except Exception as exc:  # pragma: no cover
-    docker = None  # type: ignore
-    ContainerError = DockerException = Exception  # type: ignore
-    _DOCKER_IMPORT_ERROR = str(exc)
-
 
 SANDBOX_IMAGE = "python:3.12-slim"
 SANDBOX_MEM = "256m"
@@ -51,38 +44,45 @@ def get_tools_schema() -> list[dict[str, Any]]:
 
 class SandboxExecutor:
     def __init__(self) -> None:
-        self.client = None
-        self.error: str | None = _DOCKER_IMPORT_ERROR
-        if docker is None:
+        self.docker_bin: str | None = shutil.which("docker")
+        self.error: str | None = None
+        if not self.docker_bin:
+            self.error = "docker CLI not on PATH"
             return
         try:
-            self.client = docker.from_env()
-            self.client.ping()
+            r = subprocess.run(
+                [self.docker_bin, "info", "--format", "{{.ServerVersion}}"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if r.returncode != 0:
+                self.error = (r.stderr or r.stdout or "docker info failed").strip()
         except Exception as exc:
-            self.client = None
-            self.error = str(exc)
+            self.error = f"{exc}"
 
     @property
     def available(self) -> bool:
-        return self.client is not None
+        return self.docker_bin is not None and self.error is None
 
     def run_python(self, code: str) -> str:
         if not self.available:
             return f"[sandbox unavailable] {self.error or 'docker not connected'}"
         try:
-            raw = self.client.containers.run(
-                image=SANDBOX_IMAGE,
-                command=["python", "-c", code],
-                network_mode="none",
-                mem_limit=SANDBOX_MEM,
-                remove=True,
-                stdout=True,
-                stderr=True,
+            r = subprocess.run(
+                [
+                    self.docker_bin, "run", "--rm",
+                    "--network=none",
+                    "--memory", SANDBOX_MEM,
+                    SANDBOX_IMAGE,
+                    "python", "-c", code,
+                ],
+                capture_output=True, text=True, timeout=SANDBOX_TIMEOUT_S,
             )
-            out = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else str(raw)
-            return out.strip() or "[ok] no output"
-        except ContainerError as exc:
-            stderr = exc.stderr.decode("utf-8", errors="replace") if isinstance(exc.stderr, bytes) else str(exc.stderr)
-            return f"[error] {stderr.strip()}"
+            out = (r.stdout or "") + (r.stderr or "")
+            out = out.strip()
+            if r.returncode != 0:
+                return f"[error rc={r.returncode}] {out or 'no output'}"
+            return out or "[ok] no output"
+        except subprocess.TimeoutExpired:
+            return f"[timeout] exceeded {SANDBOX_TIMEOUT_S}s"
         except Exception as exc:
             return f"[system error] {exc}"
