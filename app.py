@@ -125,7 +125,17 @@ async def _run_agent_loop(
     messages: list[dict[str, Any]],
     user_prompt: str,
 ):
-    """Yield NDJSON frames for the ReAct loop, then return final messages."""
+    """
+    Yield NDJSON frames for the ReAct loop.
+
+    Yields a final frame `{"type":"final_text","text":"..."}` when the model
+    produced its final answer inside the loop — the caller then knows NOT to
+    run another stream_chat pass (that would duplicate history and cause the
+    model to return an almost-empty response).
+
+    Yields `{"type":"needs_stream": true}` when the loop exits with no final
+    text yet — the caller should stream_chat to produce one.
+    """
     for iteration in range(AGENT_MAX_ITER):
         yield json.dumps({"type": "plan", "iteration": iteration + 1}) + "\n"
 
@@ -135,11 +145,15 @@ async def _run_agent_loop(
             options=options,
         )
         code, tool_label, used_native = _extract_code(msg)
+        content = (msg.get("content") or "").strip()
 
         if not code:
-            # Model chose to answer directly; keep its content for the final stream.
-            messages.append({"role": "assistant", "content": msg.get("content", "")})
-            audit.log(tag, user_prompt, "final-planned", {"content": msg.get("content")})
+            # Model chose to answer directly. Stream that text as tokens so the
+            # UI renders it, then signal the caller to skip stream_chat.
+            if content:
+                yield json.dumps({"type": "token", "text": content}) + "\n"
+            audit.log(tag, user_prompt, "final-planned", {"content": content})
+            yield json.dumps({"type": "final_text", "done": True}) + "\n"
             return
 
         yield json.dumps({
@@ -163,9 +177,12 @@ async def _run_agent_loop(
                 "content": (
                     "The sandbox ran your code. Output:\n"
                     f"{output}\n"
-                    "Give the final answer now, based on this output."
+                    "Now give the final answer to the original question, in plain text. "
+                    "Do not call the tool again."
                 ),
             })
+
+    yield json.dumps({"type": "needs_stream"}) + "\n"
 
 
 @app.post("/api/chat")
@@ -191,22 +208,35 @@ async def chat(req: ChatRequest) -> StreamingResponse:
         audit.log(spec.ollama_tag, req.message, "route", decision.to_dict())
 
         try:
+            skip_stream = False
             if is_coder:
                 async for frame in _run_agent_loop(
                     spec.ollama_tag, spec.options, messages, req.message,
                 ):
+                    # Peek at control frames without leaking them to the client.
+                    try:
+                        parsed = json.loads(frame)
+                    except ValueError:
+                        parsed = {}
+                    ftype = parsed.get("type")
+                    if ftype == "final_text":
+                        skip_stream = True
+                        continue
+                    if ftype == "needs_stream":
+                        continue
                     yield frame
 
-            final_text = ""
-            async for frame in ollama.stream_chat(
-                spec.ollama_tag, messages, spec.options
-            ):
-                if "token" in frame:
-                    final_text += frame["token"]
-                    yield json.dumps({"type": "token", "text": frame["token"]}) + "\n"
-                elif "stats" in frame:
-                    yield json.dumps({"type": "stats", **frame["stats"]}) + "\n"
-            audit.log(spec.ollama_tag, req.message, "final", {"text": final_text})
+            if not skip_stream:
+                final_text = ""
+                async for frame in ollama.stream_chat(
+                    spec.ollama_tag, messages, spec.options
+                ):
+                    if "token" in frame:
+                        final_text += frame["token"]
+                        yield json.dumps({"type": "token", "text": frame["token"]}) + "\n"
+                    elif "stats" in frame:
+                        yield json.dumps({"type": "stats", **frame["stats"]}) + "\n"
+                audit.log(spec.ollama_tag, req.message, "final", {"text": final_text})
         except Exception as exc:
             audit.log(spec.ollama_tag, req.message, "error", {"message": str(exc)})
             yield json.dumps({"type": "error", "message": str(exc)}) + "\n"
