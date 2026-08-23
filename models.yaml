@@ -1,0 +1,18 @@
+models:
+  - name: qwen3:8b
+    role: chat
+    vram_gb: 5.2
+    description: "Fast general assistant for conversation and queries"
+    prompt_template: "You are a helpful sovereign AI assistant. {prompt}"
+
+  - name: qwen2.5-coder:7b
+    role: code
+    vram_gb: 4.7
+    description: "Specialized model for Python, code generation, and debugging"
+    prompt_template: "You are an autonomous coding agent. You have access to a secure Python sandbox tool. You MUST use the `run_python` tool to execute the code and observe the output BEFORE giving your final answer. Do not just show the code, actually run it. \n\nUser request: {prompt}"
+
+  - name: huihui_ai/qwq-abliterated:latest
+    role: reasoning
+    vram_gb: 19
+    description: "Deep reasoning engine for complex logic, math, and architecture"
+    prompt_template: "You are an advanced reasoning model. Think step by step.\n\n{prompt}"
