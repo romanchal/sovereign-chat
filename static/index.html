@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sovereign AI Workbench</title>
+<!--
+  NOTE ON SOVEREIGNTY:
+  This page loads NO external fonts, scripts or stylesheets.
+  Every asset is inline. A single CDN reference would put a real
+  outbound request on the wire and break the air-gap claim in
+  front of the judges. Keep it that way.
+-->
+<style>
+  :root{
+    --bg:#0e1418; --panel:#161e25; --sunk:#1d262e;
+    --ink:#e4eaef; --ink-2:#94a2ae; --ink-3:#68757f;
+    --line:#28333b;
+    --accent:#e8933d; --ok:#35b184; --alert:#e2664a; --blue:#5ba3dc;
+    --mono:'Cascadia Code','Consolas','SF Mono',monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font-family:'Segoe UI',system-ui,sans-serif;font-size:15px;line-height:1.55;
+    height:100vh;display:flex;flex-direction:column}
+  header{padding:.85rem 1.2rem;border-bottom:1px solid var(--line);
+    display:flex;align-items:center;gap:1rem;flex-wrap:wrap}
+  header h1{margin:0;font-size:1rem;font-weight:600;letter-spacing:-.01em}
+  .tag{font-family:var(--mono);font-size:.68rem;color:var(--accent);
+    background:rgba(232,147,61,.12);padding:.2rem .5rem;border-radius:3px}
+  .spacer{flex:1}
+
+  .layout{flex:1;display:grid;grid-template-columns:1fr 330px;min-height:0}
+  @media(max-width:900px){.layout{grid-template-columns:1fr}#side{display:none}}
+
+  main{display:flex;flex-direction:column;min-height:0;border-right:1px solid var(--line)}
+  #log{flex:1;overflow-y:auto;padding:1.2rem;display:flex;flex-direction:column;gap:1rem}
+  .msg{max-width:74ch}
+  .msg .who{font-family:var(--mono);font-size:.66rem;letter-spacing:.09em;
+    text-transform:uppercase;color:var(--ink-3);margin-bottom:.3rem}
+  .msg.user .who{color:var(--blue)}
+  .msg.bot .who{color:var(--accent)}
+  .bubble{white-space:pre-wrap;word-wrap:break-word}
+  .msg.user .bubble{background:var(--sunk);padding:.65rem .85rem;border-radius:6px}
+
+  .routing{border:1px solid var(--accent);background:rgba(232,147,61,.07);
+    border-radius:6px;padding:.6rem .8rem;margin-bottom:.6rem;
+    font-family:var(--mono);font-size:.74rem;line-height:1.7;max-width:74ch}
+  .routing .hd{color:var(--accent);font-weight:600;letter-spacing:.08em;
+    text-transform:uppercase;font-size:.64rem;margin-bottom:.25rem}
+  .routing b{color:var(--ink)}
+  .swap{color:var(--blue)}
+
+  form{display:flex;gap:.6rem;padding:.9rem 1.2rem;border-top:1px solid var(--line)}
+  #q{flex:1;background:var(--sunk);border:1px solid var(--line);color:var(--ink);
+    border-radius:6px;padding:.65rem .8rem;font-family:inherit;font-size:.95rem;resize:none}
+  #q:focus{outline:2px solid var(--accent);outline-offset:1px}
+  button{background:var(--accent);color:#10171c;border:0;border-radius:6px;
+    padding:.65rem 1.1rem;font-weight:600;font-size:.9rem;cursor:pointer;font-family:inherit}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  button.ghost{background:transparent;color:var(--ink-2);border:1px solid var(--line)}
+
+  #side{overflow-y:auto;padding:1.1rem;display:flex;flex-direction:column;gap:1.1rem}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:7px;padding:.85rem .95rem}
+  .card h2{margin:0 0 .55rem;font-size:.66rem;font-family:var(--mono);letter-spacing:.09em;
+    text-transform:uppercase;color:var(--ink-3);font-weight:600}
+  .big{font-size:1.55rem;font-weight:700;font-variant-numeric:tabular-nums;line-height:1.1}
+  .big.ok{color:var(--ok)} .big.bad{color:var(--alert)}
+  .sub{font-size:.76rem;color:var(--ink-3);margin-top:.15rem}
+  .row{display:flex;justify-content:space-between;gap:.5rem;
+    font-family:var(--mono);font-size:.74rem;padding:.22rem 0}
+  .row span:last-child{color:var(--ink-2)}
+  .pill{display:inline-block;font-family:var(--mono);font-size:.64rem;
+    padding:.12rem .4rem;border-radius:3px}
+  .pill.gpu{background:rgba(53,177,132,.15);color:var(--ok)}
+  .pill.cpu{background:rgba(226,102,74,.15);color:var(--alert)}
+  .muted{color:var(--ink-3);font-size:.76rem}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Sovereign AI Workbench</h1>
+  <span class="tag">SIH26117 · MRPL</span>
+  <div class="spacer"></div>
+  <button class="ghost" id="warm" title="Preload every model before presenting">Warm models</button>
+</header>
+
+<div class="layout">
+  <main>
+    <div id="log">
+      <div class="msg bot">
+        <div class="who">workbench</div>
+        <div class="bubble">Ready. Ask a coding question and a document question — watch the router send them to different models.
+
+Try: "Write a Python function to parse an inspection CSV"
+Then: "Summarise what a P&amp;ID is for a new engineer"</div>
+      </div>
+    </div>
+    <form id="f">
+      <textarea id="q" rows="2" placeholder="Ask something…"></textarea>
+      <button id="send" type="submit">Send</button>
+    </form>
+  </main>
+
+  <aside id="side">
+    <div class="card">
+      <h2>Egress monitor</h2>
+      <div class="big ok" id="eg">—</div>
+      <div class="sub" id="egsub">checking…</div>
+    </div>
+
+    <div class="card">
+      <h2>Loaded in VRAM</h2>
+      <div id="loaded"><div class="muted">nothing loaded</div></div>
+    </div>
+
+    <div class="card">
+      <h2>Registry</h2>
+      <div id="reg"><div class="muted">loading…</div></div>
+    </div>
+
+    <div class="card">
+      <h2>Last response</h2>
+      <div id="stats"><div class="muted">no run yet</div></div>
+    </div>
+  </aside>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const log = $('log');
+
+function el(cls, html){ const d=document.createElement('div'); d.className=cls; d.innerHTML=html; return d; }
+function scroll(){ log.scrollTop = log.scrollHeight; }
+
+// ---------------------------------------------------------------- chat
+$('f').addEventListener('submit', async e => {
+  e.preventDefault();
+  const text = $('q').value.trim();
+  if(!text) return;
+  $('q').value=''; $('send').disabled = true;
+
+  const u = el('msg user','<div class="who">you</div>');
+  const ub = el('bubble',''); ub.textContent = text; u.appendChild(ub);
+  log.appendChild(u); scroll();
+
+  const b = el('msg bot','<div class="who">workbench</div>');
+  const routeBox = el('routing','');
+  routeBox.style.display='none';
+  const bub = el('bubble','');
+  b.appendChild(routeBox); b.appendChild(bub);
+  log.appendChild(b); scroll();
+
+  try{
+    const res = await fetch('/api/chat',{
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({message:text})
+    });
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf='';
+    while(true){
+      const {done,value} = await reader.read();
+      if(done) break;
+      buf += dec.decode(value,{stream:true});
+      const lines = buf.split('\n'); buf = lines.pop();
+      for(const line of lines){
+        if(!line.trim()) continue;
+        let m; try{ m = JSON.parse(line); }catch{ continue; }
+
+        if(m.type==='routing'){
+          routeBox.style.display='block';
+          routeBox.innerHTML =
+            '<div class="hd">routing decision</div>'+
+            '→ <b>'+m.label+'</b> ('+m.ollama_tag+')<br>'+
+            'confidence '+m.confidence+' · '+m.reason+'<br>'+
+            '<span style="color:var(--ink-3)">signals: '+m.signals.join(', ')+'</span>';
+          scroll();
+        }
+        else if(m.type==='swap'){
+          if(m.swapped){
+            routeBox.innerHTML += '<br><span class="swap">'+
+              (m.unloaded? 'unloaded '+m.unloaded+' → ':'')+
+              'loaded in '+m.swap_ms+' ms</span>';
+          } else {
+            routeBox.innerHTML += '<br><span class="swap">already resident — no swap</span>';
+          }
+          scroll();
+        }
+        else if(m.type==='token'){ bub.textContent += m.text; scroll(); }
+        else if(m.type==='stats'){
+          $('stats').innerHTML =
+            '<div class="row"><span>tokens</span><span>'+m.tokens+'</span></div>'+
+            '<div class="row"><span>tok/sec</span><span>'+m.tokens_per_sec+'</span></div>'+
+            '<div class="row"><span>total</span><span>'+m.total_ms+' ms</span></div>';
+          refreshLoaded();
+        }
+        else if(m.type==='error'){
+          bub.textContent += '\n\n[error] '+m.message;
+        }
+      }
+    }
+  }catch(err){
+    bub.textContent += '\n\n[error] '+err.message;
+  }
+  $('send').disabled = false; $('q').focus();
+});
+
+$('q').addEventListener('keydown', e=>{
+  if(e.key==='Enter' && !e.shiftKey){ e.preventDefault(); $('f').requestSubmit(); }
+});
+
+// ---------------------------------------------------------------- panels
+async function refreshEgress(){
+  try{
+    const d = await (await fetch('/api/egress')).json();
+    const n = d.external_count;
+    $('eg').textContent = n;
+    $('eg').className = 'big ' + (n===0 ? 'ok':'bad');
+    $('egsub').textContent = n===0
+      ? (d.never_dirty ? 'external calls — none, ever' : 'external calls now (peak '+d.peak_external+')')
+      : d.external.map(x=>x.process+' → '+x.remote).join(', ');
+  }catch{}
+}
+
+async function refreshLoaded(){
+  try{
+    const d = await (await fetch('/api/loaded')).json();
+    const box = $('loaded');
+    if(!d.loaded.length){ box.innerHTML='<div class="muted">nothing loaded</div>'; return; }
+    box.innerHTML = d.loaded.map(m=>
+      '<div class="row"><span>'+m.name+'</span>'+
+      '<span class="pill '+(m.gpu_pct>=99?'gpu':'cpu')+'">'+m.gpu_pct+'% GPU</span></div>'+
+      '<div class="row"><span class="muted">vram</span><span>'+m.vram_gb+' GB</span></div>'
+    ).join('');
+  }catch{}
+}
+
+async function refreshReg(){
+  try{
+    const d = await (await fetch('/api/health')).json();
+    $('reg').innerHTML = d.registry.map(m=>
+      '<div class="row"><span>'+m.id+'</span><span>'+m.tag+'</span></div>'
+    ).join('') + (d.ollama.up ? '' :
+      '<div class="muted" style="color:var(--alert);margin-top:.4rem">Ollama unreachable</div>');
+  }catch{}
+}
+
+$('warm').addEventListener('click', async ()=>{
+  $('warm').disabled=true; $('warm').textContent='Warming…';
+  try{ await fetch('/api/warm',{method:'POST'}); }catch{}
+  $('warm').textContent='Warm models'; $('warm').disabled=false;
+  refreshLoaded();
+});
+
+refreshEgress(); refreshLoaded(); refreshReg();
+setInterval(refreshEgress, 3000);
+setInterval(refreshLoaded, 8000);
+</script>
+</body>
+</html>

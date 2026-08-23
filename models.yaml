@@ -1,0 +1,48 @@
+# ─────────────────────────────────────────────────────────────
+#  MODEL REGISTRY
+#  This file IS the "add a new model without redesigning the
+#  system" requirement from the problem statement.
+#  To add a model: add an entry here. Touch no Python.
+# ─────────────────────────────────────────────────────────────
+
+models:
+  - id: reasoning
+    ollama_tag: qwen3:8b
+    label: Qwen3 8B
+    role: General reasoning, document work, drafting, calculations
+    vram_gb: 5.5
+    resident: false
+    options:
+      temperature: 0.4
+      num_ctx: 8192
+
+  - id: coder
+    ollama_tag: qwen2.5-coder:7b
+    label: Qwen2.5-Coder 7B
+    role: Code generation, debugging, script writing
+    vram_gb: 4.5
+    resident: false
+    options:
+      temperature: 0.2
+      num_ctx: 8192
+
+  # Not pulled yet — uncomment once you run:
+  #   ollama pull qwen2.5vl:7b
+  # The router will pick it up automatically on restart.
+  #
+  # - id: vision
+  #   ollama_tag: qwen2.5vl:7b
+  #   label: Qwen2.5-VL 7B
+  #   role: Scanned documents, engineering drawings, handwriting
+  #   vram_gb: 6.6
+  #   resident: false
+  #   options:
+  #     temperature: 0.3
+  #     num_ctx: 8192
+
+# Fallback used when the classifier has no strong signal.
+default_model: reasoning
+
+# Your GPU holds ~7.2 GB usable. The swap manager refuses to
+# hold more than this at once and unloads before it loads.
+vram_budget_gb: 7.2
