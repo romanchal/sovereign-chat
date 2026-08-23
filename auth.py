@@ -155,17 +155,29 @@ class UserStore:
         Returns the created admin, or None if not applicable.
         """
         if any(u.role == "admin" and not u.disabled for u in self._users.values()):
+            print(f"[auth] bootstrap skipped: admin already exists in {self.path}")
             return None
-        email = os.environ.get("BOOTSTRAP_ADMIN_EMAIL", "").strip().lower()
+        email_raw = os.environ.get("BOOTSTRAP_ADMIN_EMAIL", "")
         password = os.environ.get("BOOTSTRAP_ADMIN_PASSWORD", "")
+        email = email_raw.strip().lower()
         name = os.environ.get("BOOTSTRAP_ADMIN_NAME", "").strip() or email
-        if not email or not password:
-            return None
-        admin = User(
-            email=email, name=name, role="admin", department="general",
-            password_hash=hash_password(password),
+        print(
+            f"[auth] bootstrap check: email={email!r} "
+            f"password_len={len(password)} name={name!r}"
         )
-        self.upsert(admin)
+        if not email or not password:
+            print("[auth] bootstrap aborted: email or password empty")
+            return None
+        try:
+            admin = User(
+                email=email, name=name, role="admin", department="general",
+                password_hash=hash_password(password),
+            )
+            self.upsert(admin)
+        except Exception as exc:
+            print(f"[auth] bootstrap FAILED writing users file: {exc!r}")
+            raise
+        print(f"[auth] bootstrap wrote {self.path} with admin {email}")
         return admin
 
 
