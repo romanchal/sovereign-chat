@@ -3,23 +3,58 @@ Egress monitor — the sovereignty proof.
 
 MRPL's problem statement says the proof of the air gap must be visible
 (logs or a network monitor showing no external calls), not merely claimed.
-This module is that proof, and it is why you build it in week one: if
-something in your stack quietly phones home, you want to know now.
 
-Counts ESTABLISHED TCP connections to non-private, non-loopback addresses.
-Anything above zero while the workbench is running deserves investigation.
+Counts ESTABLISHED TCP connections to non-private, non-loopback addresses,
+FILTERED to processes that belong to the workbench (this Python process,
+its children, and Ollama). Machine-wide traffic from Chrome, Edge WebView,
+svchost etc. is out of scope for the sovereignty claim — the claim is that
+*this workbench* makes no external calls, not that the host OS is offline.
 """
 from __future__ import annotations
 
 import ipaddress
+import os
 import time
 from typing import Any
 
 import psutil
 
-# Populated once at import so the UI can show an uptime-clean streak.
 _STARTED = time.time()
 _PEAK_EXTERNAL = 0
+_OWN_PID = os.getpid()
+
+# Process names whose external connections count against the workbench.
+# Lower-case, no extension check — psutil returns names like "ollama.exe".
+_APP_PROC_NAMES = {
+    "python", "python.exe", "pythonw.exe",
+    "uvicorn", "uvicorn.exe",
+    "ollama", "ollama.exe", "ollama app.exe",
+    "ollama_llama_server", "ollama_llama_server.exe",
+    "docker", "docker.exe", "com.docker.backend.exe",
+}
+
+
+def _own_pids() -> set[int]:
+    pids = {_OWN_PID}
+    try:
+        me = psutil.Process(_OWN_PID)
+        for child in me.children(recursive=True):
+            pids.add(child.pid)
+    except Exception:
+        pass
+    return pids
+
+
+def _app_pids() -> set[int]:
+    pids = _own_pids()
+    for p in psutil.process_iter(["pid", "name"]):
+        try:
+            name = (p.info.get("name") or "").lower()
+            if name in _APP_PROC_NAMES:
+                pids.add(p.info["pid"])
+        except Exception:
+            continue
+    return pids
 
 
 def _is_external(addr: str) -> bool:
@@ -46,16 +81,19 @@ def snapshot() -> dict[str, Any]:
     inspected = 0
     degraded = False
 
+    scope_pids = _app_pids()
+
     try:
         conns = psutil.net_connections(kind="inet")
     except (psutil.AccessDenied, PermissionError):
-        # On Windows some system sockets need elevation. Report honestly
-        # rather than showing a falsely clean zero.
         conns = []
         degraded = True
 
     for c in conns:
         if c.status != psutil.CONN_ESTABLISHED or not c.raddr:
+            continue
+        # Only inspect connections owned by workbench processes.
+        if c.pid not in scope_pids:
             continue
         inspected += 1
         host = c.raddr.ip if hasattr(c.raddr, "ip") else c.raddr[0]

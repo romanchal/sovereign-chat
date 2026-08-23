@@ -18,8 +18,11 @@ DB_PATH = Path(__file__).parent / "audit.db"
 class AuditLogger:
     def __init__(self, db_path: Path = DB_PATH) -> None:
         self.conn = sqlite3.connect(str(db_path), check_same_thread=False)
+        # v2 table name — old Stack B database.py wrote a differently-shaped
+        # `agent_traces` table. Bumping the name lets us coexist with any
+        # leftover DB rather than failing loudly on a schema mismatch.
         self.conn.execute("""
-            CREATE TABLE IF NOT EXISTS agent_traces (
+            CREATE TABLE IF NOT EXISTS agent_traces_v2 (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 ts TEXT NOT NULL,
                 model TEXT NOT NULL,
@@ -31,14 +34,18 @@ class AuditLogger:
         self.conn.commit()
 
     def log(self, model: str, prompt: str, event: str, payload: Any = None) -> None:
-        self.conn.execute(
-            "INSERT INTO agent_traces (ts, model, prompt, event, payload) VALUES (?,?,?,?,?)",
-            (
-                datetime.now(timezone.utc).isoformat(),
-                model,
-                prompt,
-                event,
-                json.dumps(payload, default=str) if payload is not None else None,
-            ),
-        )
-        self.conn.commit()
+        # Audit is best-effort. A DB hiccup must not abort the user's request.
+        try:
+            self.conn.execute(
+                "INSERT INTO agent_traces_v2 (ts, model, prompt, event, payload) VALUES (?,?,?,?,?)",
+                (
+                    datetime.now(timezone.utc).isoformat(),
+                    model,
+                    prompt,
+                    event,
+                    json.dumps(payload, default=str) if payload is not None else None,
+                ),
+            )
+            self.conn.commit()
+        except Exception as exc:
+            print(f"[audit] write failed: {exc}")
