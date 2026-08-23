@@ -255,6 +255,28 @@
     background:transparent;transition:border-color .15s,color .15s}
   .up-btn:hover{border-color:var(--accent);color:var(--ink)}
   #uploadStatus{font-family:var(--mono);font-size:11px;color:var(--ink-3);margin-top:6px;min-height:1.1em}
+
+  .doc{padding:8px 0;border-bottom:1px solid var(--line)}
+  .doc:last-child{border-bottom:0}
+  .doc .head{display:flex;align-items:center;gap:8px}
+  .doc .fname{flex:1;color:var(--ink);font-weight:500;font-size:13px;
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+  .doc .del{opacity:0;width:22px;height:22px;border-radius:5px;
+    color:var(--ink-3);font-size:14px;line-height:1;
+    display:flex;align-items:center;justify-content:center;
+    transition:opacity .15s,background .15s,color .15s}
+  .doc:hover .del{opacity:1}
+  .doc .del:hover{background:rgba(226,102,74,.15);color:var(--alert)}
+  .doc .sub{display:flex;justify-content:space-between;gap:8px;color:var(--ink-3);
+    font-family:var(--mono);font-size:11px;margin-top:3px}
+
+  .hist .item{position:relative;padding-right:28px}
+  .hist .item .x{position:absolute;right:6px;top:50%;transform:translateY(-50%);
+    opacity:0;width:20px;height:20px;border-radius:4px;color:var(--ink-3);
+    font-size:13px;line-height:1;display:flex;align-items:center;justify-content:center;
+    transition:opacity .12s,background .12s,color .12s}
+  .hist .item:hover .x{opacity:1}
+  .hist .item .x:hover{background:rgba(226,102,74,.18);color:var(--alert)}
 </style>
 </head>
 <body>
@@ -353,7 +375,7 @@
       <select id="uploadDept" title="Department"></select>
       <select id="uploadAccess" title="Access level"></select>
     </div>
-    <input type="file" id="upload" accept=".pdf,.txt,.md,.docx,.xlsx,.pptx" style="display:none">
+    <input type="file" id="upload" accept=".pdf,.txt,.md,.docx,.xlsx,.pptx,.png,.jpg,.jpeg,.webp" style="display:none">
     <button class="up-btn" id="uploadBtn">+ Ingest file</button>
     <div id="uploadStatus"></div>
   </div>
@@ -368,7 +390,21 @@
 const $ = id => document.getElementById(id);
 const log = $('log');
 let ME = null;
-let history = [];  // {id, title, firstAt, node} — session-only for now.
+
+// ─────────────────────────── conversation persistence (localStorage per user)
+// Keyed by user email so a shared machine keeps per-user history separate.
+// Only plain user/assistant text is persisted — meta blocks (routing,
+// citations, agent steps) are transient and re-rendered live, not saved.
+const STORE = {
+  key(){ return 'sac:' + (ME?.email || 'anon'); },
+  load(){
+    try{ return JSON.parse(localStorage.getItem(this.key())) || {convs:[], active:null}; }
+    catch{ return {convs:[], active:null}; }
+  },
+  save(state){ localStorage.setItem(this.key(), JSON.stringify(state)); },
+};
+let CONVS = [];       // [{id, title, updated, msgs:[{role,text}]}]  newest first
+let ACTIVE = null;    // id of active conversation, null if none
 
 function el(tag, cls, html){
   const d = document.createElement(tag); if(cls) d.className = cls;
@@ -387,38 +423,95 @@ async function api(url, opts={}){
   return r;
 }
 
-// ─────────────────────────────────────────── History (session-scoped stub)
-function pushHistory(text){
-  const id = 'c' + Date.now();
-  const title = text.length > 42 ? text.slice(0, 40) + '…' : text;
-  const item = { id, title };
-  history.unshift(item);
-  renderHistory();
-  $('convTitle').textContent = title;
+// ─────────────────────────── conversation helpers
+function persist(){ STORE.save({convs: CONVS, active: ACTIVE}); }
+function activeConv(){ return CONVS.find(c => c.id === ACTIVE) || null; }
+function ensureActive(firstText){
+  if(activeConv()) return activeConv();
+  const c = {
+    id: 'c' + Date.now(),
+    title: (firstText && firstText.length>42) ? firstText.slice(0,40)+'…' : (firstText || 'New chat'),
+    updated: Date.now(),
+    msgs: [],
+  };
+  CONVS.unshift(c); ACTIVE = c.id; persist(); renderHistory(); setTitle(c.title);
+  return c;
 }
+function setTitle(t){ $('convTitle').textContent = t; }
+
 function renderHistory(){
   const box = $('histList');
-  if(!history.length){ box.innerHTML = '<div class="empty">No conversations yet.</div>'; return; }
+  if(!CONVS.length){ box.innerHTML = '<div class="empty">No conversations yet.</div>'; return; }
   box.innerHTML = '';
-  history.forEach((h,i)=>{
-    const el = document.createElement('div');
-    el.className = 'item' + (i===0 ? ' active' : '');
-    el.textContent = h.title;
-    el.title = h.title;
-    box.appendChild(el);
+  CONVS.forEach(c=>{
+    const it = document.createElement('div');
+    it.className = 'item' + (c.id === ACTIVE ? ' active' : '');
+    it.title = c.title;
+    it.textContent = c.title;
+    it.addEventListener('click', e=>{
+      if(e.target.classList.contains('x')) return;
+      openConv(c.id);
+    });
+    const x = document.createElement('button');
+    x.className = 'x'; x.textContent = '×'; x.title = 'Delete conversation';
+    x.addEventListener('click', e=>{
+      e.stopPropagation();
+      if(!confirm('Delete this conversation? Cannot be undone.')) return;
+      CONVS = CONVS.filter(k => k.id !== c.id);
+      if(ACTIVE === c.id){ ACTIVE = CONVS[0]?.id || null; }
+      persist(); renderHistory();
+      if(ACTIVE) openConv(ACTIVE); else openEmpty();
+    });
+    it.appendChild(x);
+    box.appendChild(it);
   });
 }
-$('newChat').addEventListener('click', ()=>{
-  log.innerHTML = '';
-  const empty = el('div','empty');
-  empty.innerHTML = document.querySelector('template#emptyTpl')?.innerHTML || '';
-  // Rebuild the empty state inline (no template — quick reload):
-  log.innerHTML =
-    '<div class="empty"><h2>New chat</h2><p>Fresh conversation. Retrieval still points at your knowledge base.</p></div>';
-  $('convTitle').textContent = 'Untitled chat';
-});
 
-// ─────────────────────────────────────────── Chat
+function openEmpty(){
+  ACTIVE = null; persist();
+  setTitle('Untitled chat');
+  log.innerHTML =
+    '<div class="empty" id="empty">'+
+      '<h2>Ready when you are</h2>'+
+      '<p>Ask about your uploaded documents, request code the sandbox can run, or drop a new file in the inspector.</p>'+
+      '<div class="starters">'+
+        '<button data-p="Summarise the key findings in the most recent uploaded document."><span class="k">Docs</span>Summarise the latest uploaded document</button>'+
+        '<button data-p="Write a Python function that parses a CSV of pump readings and flags outliers, and run it."><span class="k">Code</span>Write and test a CSV outlier check</button>'+
+        '<button data-p="What safety procedures are described in the authorised documents?"><span class="k">RAG</span>List safety procedures in the KB</button>'+
+        '<button data-p="Draft a one-page approval note based on the inspection report."><span class="k">Draft</span>Draft an approval note</button>'+
+      '</div>'+
+    '</div>';
+  renderHistory();
+}
+
+function openConv(id){
+  const c = CONVS.find(k => k.id === id);
+  if(!c){ openEmpty(); return; }
+  ACTIVE = c.id; persist();
+  setTitle(c.title);
+  log.innerHTML = '';
+  const list = el('div','msg-list'); log.appendChild(list);
+  c.msgs.forEach(m => renderStoredMsg(list, m.role, m.text));
+  renderHistory();
+  scroll();
+}
+
+function renderStoredMsg(list, role, text){
+  if(role === 'user'){
+    const u = el('div','msg user');
+    u.appendChild(textEl('div','bubble', text));
+    list.appendChild(u);
+  } else {
+    const b = el('div','msg bot');
+    b.appendChild(el('div','who','<span class="badge">S</span>Workbench'));
+    b.appendChild(textEl('div','bubble', text));
+    list.appendChild(b);
+  }
+}
+
+$('newChat').addEventListener('click', openEmpty);
+
+// ─────────────────────────── send
 function ensureMsgList(){
   let list = log.querySelector('.msg-list');
   if(!list){
@@ -432,9 +525,17 @@ function ensureMsgList(){
 async function send(text){
   if(!text.trim()) return;
   const list = ensureMsgList();
-  if(!history.length || history[0].title !== (text.length>42 ? text.slice(0,40)+'…' : text)){
-    pushHistory(text);
+  const conv = ensureActive(text);
+
+  // Persist user message immediately so a refresh mid-answer preserves it.
+  conv.msgs.push({role:'user', text});
+  conv.updated = Date.now();
+  if(!conv.msgs.some(m=>m.role==='user' && m !== conv.msgs[conv.msgs.length-1])){
+    // First user message — lock in the title.
+    conv.title = text.length>42 ? text.slice(0,40)+'…' : text;
+    setTitle(conv.title); renderHistory();
   }
+  persist();
 
   const u = el('div','msg user');
   const ub = textEl('div','bubble', text);
@@ -463,6 +564,7 @@ async function send(text){
 
   const hideThinking = ()=>{ if(thinking.parentNode) thinking.remove(); };
   $('send').disabled = true; $('q').disabled = true;
+  let assistantText = '';
 
   try{
     const res = await api('/api/chat',{
@@ -531,6 +633,7 @@ async function send(text){
         else if(m.type==='token'){
           hideThinking();
           bub.appendChild(document.createTextNode(m.text));
+          assistantText += m.text;
           scroll();
         }
         else if(m.type==='stats'){
@@ -542,14 +645,24 @@ async function send(text){
         }
         else if(m.type==='error'){
           hideThinking();
-          bub.appendChild(document.createTextNode('\n\n[error] '+m.message));
+          const err = '\n\n[error] '+m.message;
+          bub.appendChild(document.createTextNode(err));
+          assistantText += err;
         }
         else if(m.type==='done'){ hideThinking(); }
       }
     }
   }catch(err){
     hideThinking();
-    bub.appendChild(document.createTextNode('\n\n[error] '+err.message));
+    const msg = '\n\n[error] '+err.message;
+    bub.appendChild(document.createTextNode(msg));
+    assistantText += msg;
+  }
+  // Persist final assistant text.
+  if(assistantText){
+    conv.msgs.push({role:'assistant', text: assistantText});
+    conv.updated = Date.now();
+    persist();
   }
   $('send').disabled = false; $('q').disabled = false; $('q').focus();
 }
@@ -610,14 +723,41 @@ async function refreshDocs(){
     const d = await (await api('/api/documents')).json();
     const box = $('docs');
     if(!d.documents.length){ box.innerHTML = '<div class="muted">no documents visible</div>'; return; }
-    box.innerHTML = d.documents.slice(0,10).map(x=>{
+    box.innerHTML = '';
+    d.documents.slice(0,20).forEach(x=>{
       const size = x.bytes>1e6 ? (x.bytes/1e6).toFixed(1)+' MB' : Math.round(x.bytes/1024)+' KB';
-      const label = x.filename.length>26 ? x.filename.slice(0,24)+'…' : x.filename;
-      return '<div class="row"><span class="b" title="'+escapeHtml(x.filename)+'">'+escapeHtml(label)+'</span>'+
-             '<span class="v">'+x.chunks+' ch · '+size+'</span></div>'+
-             '<div class="row" style="opacity:.7"><span class="v">'+x.department+' · '+x.access_level+'</span>'+
-             '<span class="v">'+escapeHtml(x.uploaded_by||'')+'</span></div>';
-    }).join('') + '<div class="muted" style="margin-top:6px">visible '+d.documents.length+' / total '+d.total_documents+' · chunks '+d.chunk_count+'</div>';
+      const label = x.filename.length>28 ? x.filename.slice(0,26)+'…' : x.filename;
+      const row = document.createElement('div'); row.className='doc';
+      const head = document.createElement('div'); head.className='head';
+      const name = document.createElement('span'); name.className='fname';
+      name.title = x.filename; name.textContent = label;
+      head.appendChild(name);
+      const canDelete = ME && (ME.is_admin || (x.uploaded_by||'').toLowerCase() === (ME.email||'').toLowerCase());
+      if(canDelete){
+        const del = document.createElement('button');
+        del.className='del'; del.textContent='×'; del.title='Remove document';
+        del.addEventListener('click', async ()=>{
+          if(!confirm('Remove "'+x.filename+'" from the knowledge base?')) return;
+          try{
+            const r = await api('/api/documents/'+encodeURIComponent(x.doc_id),{method:'DELETE'});
+            const j = await r.json();
+            if(!r.ok) alert('delete failed: '+(j.detail||r.status));
+          }catch(err){ alert('delete failed: '+err.message); }
+          refreshDocs();
+        });
+        head.appendChild(del);
+      }
+      row.appendChild(head);
+      const sub = document.createElement('div'); sub.className='sub';
+      sub.innerHTML = '<span>'+x.department+' · '+x.access_level+' · '+x.chunks+' ch</span>'+
+                      '<span>'+size+(x.uploaded_by?' · '+escapeHtml(x.uploaded_by):'')+'</span>';
+      row.appendChild(sub);
+      box.appendChild(row);
+    });
+    const footer = document.createElement('div'); footer.className='muted';
+    footer.style.marginTop = '6px';
+    footer.textContent = 'visible '+d.documents.length+' / total '+d.total_documents+' · chunks '+d.chunk_count;
+    box.appendChild(footer);
   }catch{}
 }
 async function refreshMe(){
@@ -683,7 +823,13 @@ $('upload').addEventListener('change', async e=>{
   $('uploadBtn').disabled = false; $('upload').value = '';
 });
 
-refreshMe().then(()=>{ refreshEgress(); refreshLoaded(); refreshReg(); refreshDocs(); });
+refreshMe().then(()=>{
+  const state = STORE.load();
+  CONVS = state.convs || [];
+  ACTIVE = state.active && CONVS.some(c=>c.id===state.active) ? state.active : (CONVS[0]?.id || null);
+  if(ACTIVE) openConv(ACTIVE); else openEmpty();
+  refreshEgress(); refreshLoaded(); refreshReg(); refreshDocs();
+});
 setInterval(refreshEgress, 3000);
 setInterval(refreshLoaded, 8000);
 </script>

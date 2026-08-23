@@ -84,6 +84,7 @@ if not users.all():
 AuthContext.store = users
 
 EMBED_MODEL_ID = "embed"
+VISION_MODEL_ID = "vision"
 EMBED_BATCH = 32
 RAG_TOP_K = 5
 
@@ -203,6 +204,32 @@ async def reload_registry(user: User = Depends(require_admin)) -> dict[str, Any]
     return {"registry": registry.as_list()}
 
 
+@app.delete("/api/documents/{doc_id}")
+async def delete_document(
+    doc_id: str, user: User = Depends(current_user),
+) -> dict[str, Any]:
+    docs = store.list_documents()
+    meta = next((d for d in docs if d["doc_id"] == doc_id), None)
+    if not meta:
+        raise HTTPException(404, "no such document")
+    if not permits_doc(user, meta):
+        raise HTTPException(403, "not authorized for this document")
+    if not (user.is_admin or (meta.get("uploaded_by") or "") == user.email):
+        raise HTTPException(403, "only the uploader or an admin can delete")
+
+    # Remove the physical file (best-effort; the index removal is authoritative).
+    for f in UPLOADS_DIR.glob(f"{doc_id}_*"):
+        try:
+            f.unlink()
+        except Exception:
+            pass
+    store.delete_document(doc_id)
+    audit.log("store", user.email, "document-deleted", {
+        "doc_id": doc_id, "filename": meta.get("filename"),
+    })
+    return {"deleted": True, "doc_id": doc_id}
+
+
 # ────────────────────────────────────────────────────────── admin endpoints
 
 @app.get("/api/admin/users")
@@ -261,8 +288,6 @@ async def ingest_file(
     stored.write_bytes(content)
 
     if store.has_doc(doc_id):
-        # Update metadata even on a re-upload — the uploader may want to move
-        # a doc between departments without re-embedding it.
         store.set_meta(doc_id, department, access_level, user.email)
         return {
             "doc_id": doc_id, "filename": filename, "reused": True,
@@ -271,7 +296,25 @@ async def ingest_file(
         }
 
     try:
-        chunks, mime, pages = ingest_mod.chunks_for(stored)
+        vision_needed = ingest_mod.needs_vision(stored)
+        if vision_needed:
+            if not registry.has(VISION_MODEL_ID):
+                raise HTTPException(
+                    422,
+                    "this file needs the vision model (scanned/image), but "
+                    "'vision' is not in the registry. Run: ollama pull qwen2.5vl:7b",
+                )
+            vl_spec = registry.get(VISION_MODEL_ID)
+            await ollama.ensure_loaded(vl_spec.ollama_tag)
+
+            async def _extract(b64: str) -> str:
+                return await ollama.vl_extract_text(vl_spec.ollama_tag, b64, vl_spec.options)
+
+            chunks, mime, pages = await ingest_mod.chunks_via_vision(stored, _extract)
+        else:
+            chunks, mime, pages = ingest_mod.chunks_for(stored)
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(422, f"extraction failed: {exc}")
 
@@ -302,12 +345,13 @@ async def ingest_file(
     audit.log(embed_spec.ollama_tag, filename, "ingest", {
         "doc_id": doc_id, "chunks": len(rows), "pages": pages,
         "department": department, "access_level": access_level,
-        "uploaded_by": user.email,
+        "uploaded_by": user.email, "vision": vision_needed,
     })
     return {
         "doc_id": doc_id, "filename": filename, "reused": False,
         "chunks": len(rows), "pages": pages, "mime": mime,
         "department": department, "access_level": access_level,
+        "vision": vision_needed,
     }
 
 

@@ -26,19 +26,18 @@ models:
       temperature: 0.2
       num_ctx: 8192
 
-  # Not pulled yet — uncomment once you run:
+  # Pull once on the demo box:
   #   ollama pull qwen2.5vl:7b
-  # The router will pick it up automatically on restart.
-  #
-  # - id: vision
-  #   ollama_tag: qwen2.5vl:7b
-  #   label: Qwen2.5-VL 7B
-  #   role: Scanned documents, engineering drawings, handwriting
-  #   vram_gb: 6.6
-  #   resident: false
-  #   options:
-  #     temperature: 0.3
-  #     num_ctx: 8192
+  # Used for image uploads and OCR of scanned PDFs.
+  - id: vision
+    ollama_tag: qwen2.5vl:7b
+    label: Qwen2.5-VL 7B
+    role: Scanned documents, engineering drawings, handwriting
+    vram_gb: 6.6
+    resident: false
+    options:
+      temperature: 0.3
+      num_ctx: 8192
 
   # Embedding model for RAG ingest + retrieval. Small, CPU-friendly,
   # stays resident permanently so document search never triggers a swap.

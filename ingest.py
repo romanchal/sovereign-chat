@@ -11,12 +11,24 @@ can be wired end to end today.
 """
 from __future__ import annotations
 
+import base64
 from pathlib import Path
-from typing import Callable
+from typing import Awaitable, Callable
 
 from chunker import Chunk, chunk_pages, chunk_text
 
-SUPPORTED_EXTS = {".pdf", ".txt", ".md", ".docx", ".xlsx", ".pptx"}
+# .pdf covers both native-text and scanned; scanned PDFs and raw images
+# route through the VL model at ingest time (see needs_vision + chunks_for_vision).
+IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
+SUPPORTED_EXTS = {".pdf", ".txt", ".md", ".docx", ".xlsx", ".pptx"} | IMAGE_EXTS
+
+# Below this many characters across all extracted PDF pages we assume the PDF
+# is scanned / image-only and fall back to VL OCR. Tuned to catch pages where
+# pypdf returns a handful of garbage glyphs from a scan.
+SCANNED_PDF_CHAR_THRESHOLD = 40
+
+# Cap the number of pages we OCR per document to keep ingest bounded.
+MAX_OCR_PAGES = 40
 
 
 def _extract_pdf(path: Path) -> list[str]:
@@ -91,8 +103,28 @@ EXTRACTORS: dict[str, Callable[[Path], list[str]]] = {
 }
 
 
+def needs_vision(path: Path, pages: list[str] | None = None) -> bool:
+    """
+    True when the file must be routed through the VL model at ingest:
+    - raw image formats
+    - PDFs whose native text extraction is empty / scan-only
+    """
+    ext = path.suffix.lower()
+    if ext in IMAGE_EXTS:
+        return True
+    if ext == ".pdf":
+        if pages is None:
+            try:
+                pages = _extract_pdf(path)
+            except Exception:
+                return True
+        total = sum(len((p or "").strip()) for p in pages)
+        return total < SCANNED_PDF_CHAR_THRESHOLD
+    return False
+
+
 def extract(path: Path) -> tuple[list[str], str]:
-    """Return (list_of_page_texts, mime_hint)."""
+    """Return (list_of_page_texts, mime_hint) for native-text formats only."""
     ext = path.suffix.lower()
     if ext not in EXTRACTORS:
         raise ValueError(f"unsupported file type: {ext}")
@@ -100,10 +132,45 @@ def extract(path: Path) -> tuple[list[str], str]:
 
 
 def chunks_for(path: Path) -> tuple[list[Chunk], str, int]:
-    """Return (chunks, mime_hint, page_count) for a file."""
+    """Return (chunks, mime_hint, page_count) for a native-text file."""
     pages, mime = extract(path)
     if len(pages) <= 1:
-        # No native pagination; keep page=0 so callers can render "n/a".
         text = pages[0] if pages else ""
         return chunk_text(text, page=0), mime, 1 if text.strip() else 0
     return chunk_pages(pages), mime, len(pages)
+
+
+async def chunks_via_vision(
+    path: Path,
+    extract_text: Callable[[str], Awaitable[str]],
+) -> tuple[list[Chunk], str, int]:
+    """
+    Route an image or scanned PDF through a VL model. `extract_text` is an
+    async callable (b64_png) -> extracted_text so this module does not need
+    to know about ollama_client directly (easier to test, easier to swap for
+    a local OCR engine later).
+    """
+    ext = path.suffix.lower()
+    if ext in IMAGE_EXTS:
+        b64 = base64.b64encode(path.read_bytes()).decode("ascii")
+        text = await extract_text(b64)
+        return chunk_text(text, page=1), ext.lstrip("."), 1
+
+    if ext == ".pdf":
+        import fitz  # PyMuPDF
+        pages_text: list[str] = []
+        doc = fitz.open(str(path))
+        try:
+            for i, page in enumerate(doc):
+                if i >= MAX_OCR_PAGES:
+                    break
+                pix = page.get_pixmap(dpi=150)
+                png = pix.tobytes("png")
+                b64 = base64.b64encode(png).decode("ascii")
+                text = await extract_text(b64)
+                pages_text.append(text)
+        finally:
+            doc.close()
+        return chunk_pages(pages_text), "pdf", len(pages_text)
+
+    raise ValueError(f"vision path does not support {ext}")

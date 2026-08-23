@@ -253,6 +253,23 @@ class Store:
             })
         return out
 
+    def delete_document(self, doc_id: str) -> None:
+        """Remove all chunks, the document row, and the sidecar meta."""
+        if self._chunks is not None:
+            try:
+                self._chunks.delete(f"doc_id = '{doc_id}'")
+            except Exception:
+                pass
+        try:
+            self._docs.delete(f"doc_id = '{doc_id}'")
+        except Exception:
+            pass
+        try:
+            self._meta_conn.execute("DELETE FROM doc_meta WHERE doc_id = ?", (doc_id,))
+            self._meta_conn.commit()
+        except Exception:
+            pass
+
     def chunk_count(self) -> int:
         if self._chunks is None:
             return 0

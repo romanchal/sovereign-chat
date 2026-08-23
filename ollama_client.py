@@ -93,6 +93,37 @@ class OllamaClient:
             results.append({"tag": tag, **info})
         return results
 
+    # ------------------------------------------------------------------ vision
+
+    async def vl_extract_text(
+        self,
+        tag: str,
+        image_b64: str,
+        options: dict[str, Any] | None = None,
+    ) -> str:
+        """
+        Send one image (base64 PNG/JPEG, no data-URL prefix) to a vision model
+        and return the extracted text. Used both for direct image ingest and
+        for OCR of scanned PDF pages.
+        """
+        payload = {
+            "model": tag,
+            "prompt": (
+                "Extract every readable piece of text from this image. "
+                "Preserve line breaks, paragraphs, tables, form labels, and "
+                "handwritten notes. Do not summarize. Do not add commentary. "
+                "Return only the extracted text."
+            ),
+            "images": [image_b64],
+            "stream": False,
+            "keep_alive": KEEP_ALIVE,
+            "options": options or {},
+        }
+        async with httpx.AsyncClient(timeout=None) as c:
+            r = await c.post(f"{self.base_url}/api/generate", json=payload)
+            r.raise_for_status()
+            return (r.json().get("response") or "").strip()
+
     # ------------------------------------------------------------------ embed
 
     async def embed(self, tag: str, texts: list[str]) -> list[list[float]]:
