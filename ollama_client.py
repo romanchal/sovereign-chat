@@ -95,6 +95,28 @@ class OllamaClient:
 
     # ------------------------------------------------------------------ chat
 
+    async def chat_once(
+        self,
+        tag: str,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        options: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """One non-streaming turn. Used by the agent loop to inspect tool_calls."""
+        payload: dict[str, Any] = {
+            "model": tag,
+            "messages": messages,
+            "stream": False,
+            "keep_alive": KEEP_ALIVE,
+            "options": options or {},
+        }
+        if tools:
+            payload["tools"] = tools
+        async with httpx.AsyncClient(timeout=None) as c:
+            r = await c.post(f"{self.base_url}/api/chat", json=payload)
+            r.raise_for_status()
+            return r.json().get("message", {}) or {}
+
     async def stream_chat(
         self,
         tag: str,

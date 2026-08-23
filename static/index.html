@@ -51,6 +51,15 @@
   .routing b{color:var(--ink)}
   .swap{color:var(--blue)}
 
+  .step{border-left:2px solid var(--line);padding:.35rem .7rem;margin:.4rem 0;
+    font-family:var(--mono);font-size:.78rem;max-width:74ch}
+  .step.plan{border-color:var(--blue);color:var(--blue)}
+  .step.call{border-color:var(--accent)}
+  .step.out{border-color:var(--ok)}
+  .step .lbl{font-size:.62rem;letter-spacing:.09em;text-transform:uppercase;
+    color:var(--ink-3);margin-bottom:.15rem}
+  .step pre{margin:.2rem 0 0;white-space:pre-wrap;word-wrap:break-word;color:var(--ink)}
+
   form{display:flex;gap:.6rem;padding:.9rem 1.2rem;border-top:1px solid var(--line)}
   #q{flex:1;background:var(--sunk);border:1px solid var(--line);color:var(--ink);
     border-radius:6px;padding:.65rem .8rem;font-family:inherit;font-size:.95rem;resize:none}
@@ -187,6 +196,22 @@ $('f').addEventListener('submit', async e => {
             routeBox.innerHTML += '<br><span class="swap">already resident — no swap</span>';
           }
           scroll();
+        }
+        else if(m.type==='plan'){
+          const s = el('step plan',
+            '<div class="lbl">agent · iteration '+m.iteration+'</div>'+
+            '<div>planning next step…</div>');
+          b.insertBefore(s, bub); scroll();
+        }
+        else if(m.type==='tool_call'){
+          const pre = document.createElement('pre'); pre.textContent = m.code;
+          const s = el('step call','<div class="lbl">tool · '+m.tool+'</div>');
+          s.appendChild(pre); b.insertBefore(s, bub); scroll();
+        }
+        else if(m.type==='tool_output'){
+          const pre = document.createElement('pre'); pre.textContent = m.output;
+          const s = el('step out','<div class="lbl">sandbox output</div>');
+          s.appendChild(pre); b.insertBefore(s, bub); scroll();
         }
         else if(m.type==='token'){ bub.textContent += m.text; scroll(); }
         else if(m.type==='stats'){
