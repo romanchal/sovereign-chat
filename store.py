@@ -10,6 +10,7 @@ Retrieval lives in Phase 3b; this module just writes and lists for now.
 from __future__ import annotations
 
 import hashlib
+import sqlite3
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -21,6 +22,7 @@ import pyarrow as pa
 BASE = Path(__file__).parent
 INDEX_DIR = BASE / "data" / "index"
 UPLOADS_DIR = BASE / "data" / "uploads"
+META_DB_PATH = BASE / "data" / "doc_meta.sqlite"
 CHUNKS_TABLE = "chunks"
 DOCS_TABLE = "documents"
 
@@ -81,6 +83,19 @@ class Store:
             self._docs = self.db.open_table(DOCS_TABLE)
         else:
             self._docs = self.db.create_table(DOCS_TABLE, schema=_docs_schema())
+
+        # Sidecar SQLite for permission metadata. Kept out of LanceDB to avoid
+        # its schema-evolution rough edges when we add new fields later.
+        self._meta_conn = sqlite3.connect(str(META_DB_PATH), check_same_thread=False)
+        self._meta_conn.execute("""
+            CREATE TABLE IF NOT EXISTS doc_meta (
+                doc_id TEXT PRIMARY KEY,
+                department TEXT NOT NULL DEFAULT 'general',
+                access_level TEXT NOT NULL DEFAULT 'all',
+                uploaded_by TEXT
+            )
+        """)
+        self._meta_conn.commit()
 
     # ------------------------------------------------------------------ ids
 
@@ -151,21 +166,47 @@ class Store:
 
     # ------------------------------------------------------------------ reads
 
+    def set_meta(
+        self, doc_id: str, department: str, access_level: str, uploaded_by: str | None,
+    ) -> None:
+        self._meta_conn.execute(
+            "INSERT OR REPLACE INTO doc_meta (doc_id, department, access_level, uploaded_by)"
+            " VALUES (?,?,?,?)",
+            (doc_id, department, access_level, uploaded_by),
+        )
+        self._meta_conn.commit()
+
+    def _all_meta(self) -> dict[str, dict[str, Any]]:
+        cur = self._meta_conn.execute(
+            "SELECT doc_id, department, access_level, uploaded_by FROM doc_meta"
+        )
+        return {r[0]: {
+            "department": r[1], "access_level": r[2], "uploaded_by": r[3],
+        } for r in cur.fetchall()}
+
     def list_documents(self) -> list[dict[str, Any]]:
         try:
             rows = self._docs.search().limit(1000).to_list()
         except Exception:
             return []
+        meta_by_id = self._all_meta()
         rows.sort(key=lambda r: r.get("ingested_at", 0), reverse=True)
-        return [{
-            "doc_id": r["doc_id"],
-            "filename": r["filename"],
-            "mime": r["mime"],
-            "bytes": r["bytes"],
-            "pages": r["pages"],
-            "chunks": r["chunks"],
-            "ingested_at": r["ingested_at"],
-        } for r in rows]
+        out = []
+        for r in rows:
+            m = meta_by_id.get(r["doc_id"], {})
+            out.append({
+                "doc_id": r["doc_id"],
+                "filename": r["filename"],
+                "mime": r["mime"],
+                "bytes": r["bytes"],
+                "pages": r["pages"],
+                "chunks": r["chunks"],
+                "ingested_at": r["ingested_at"],
+                "department": m.get("department", "general"),
+                "access_level": m.get("access_level", "all"),
+                "uploaded_by": m.get("uploaded_by"),
+            })
+        return out
 
     def doc_lookup(self, doc_ids: list[str]) -> dict[str, dict[str, Any]]:
         """Fetch document metadata for a set of doc_ids (single query)."""

@@ -79,6 +79,8 @@
   #q{flex:1;background:var(--sunk);border:1px solid var(--line);color:var(--ink);
     border-radius:6px;padding:.65rem .8rem;font-family:inherit;font-size:.95rem;resize:none}
   #q:focus{outline:2px solid var(--accent);outline-offset:1px}
+  select{background:var(--sunk);border:1px solid var(--line);color:var(--ink);
+    border-radius:5px;padding:.35rem .4rem;font-family:var(--mono);font-size:.72rem}
   button{background:var(--accent);color:#10171c;border:0;border-radius:6px;
     padding:.65rem 1.1rem;font-weight:600;font-size:.9rem;cursor:pointer;font-family:inherit}
   button:disabled{opacity:.45;cursor:not-allowed}
@@ -107,7 +109,9 @@
   <h1>Sovereign AI Workbench</h1>
   <span class="tag">SIH26117 · MRPL</span>
   <div class="spacer"></div>
+  <span id="who" class="tag" style="color:var(--blue);background:rgba(91,163,220,.10)">…</span>
   <button class="ghost" id="warm" title="Preload every model before presenting">Warm models</button>
+  <button class="ghost" id="logout" title="Sign out">Logout</button>
 </header>
 
 <div class="layout">
@@ -152,11 +156,20 @@ Then: "Summarise what a P&amp;ID is for a new engineer"</div>
     <div class="card">
       <h2>Knowledge base</h2>
       <div id="docs"><div class="muted">no documents</div></div>
-      <div style="display:flex;gap:.4rem;margin-top:.55rem">
+      <div style="display:flex;flex-direction:column;gap:.35rem;margin-top:.6rem">
+        <div style="display:flex;gap:.35rem">
+          <select id="uploadDept" title="Department" style="flex:1"></select>
+          <select id="uploadAccess" title="Access level" style="flex:1"></select>
+        </div>
         <input type="file" id="upload" accept=".pdf,.txt,.md,.docx,.xlsx,.pptx" style="display:none">
-        <button class="ghost" id="uploadBtn" style="flex:1">+ Ingest file</button>
+        <button class="ghost" id="uploadBtn">+ Ingest file</button>
       </div>
       <div class="muted" id="uploadStatus" style="margin-top:.35rem"></div>
+    </div>
+
+    <div class="card" id="adminCard" style="display:none">
+      <h2>Admin · users</h2>
+      <div id="userList"><div class="muted">loading…</div></div>
     </div>
   </aside>
 </div>
@@ -164,9 +177,16 @@ Then: "Summarise what a P&amp;ID is for a new engineer"</div>
 <script>
 const $ = id => document.getElementById(id);
 const log = $('log');
+let ME = null;
 
 function el(cls, html){ const d=document.createElement('div'); d.className=cls; d.innerHTML=html; return d; }
 function scroll(){ log.scrollTop = log.scrollHeight; }
+
+async function api(url, opts={}){
+  const r = await fetch(url, opts);
+  if(r.status === 401){ window.location = '/login'; throw new Error('unauthenticated'); }
+  return r;
+}
 
 // ---------------------------------------------------------------- chat
 $('f').addEventListener('submit', async e => {
@@ -190,7 +210,7 @@ $('f').addEventListener('submit', async e => {
   const hideSkel = () => { if(skel.parentNode) skel.remove(); };
 
   try{
-    const res = await fetch('/api/chat',{
+    const res = await api('/api/chat',{
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({message:text})
     });
@@ -284,7 +304,7 @@ $('q').addEventListener('keydown', e=>{
 // ---------------------------------------------------------------- panels
 async function refreshEgress(){
   try{
-    const d = await (await fetch('/api/egress')).json();
+    const d = await (await api('/api/egress')).json();
     const n = d.external_count;
     $('eg').textContent = n;
     $('eg').className = 'big ' + (n===0 ? 'ok':'bad');
@@ -296,7 +316,7 @@ async function refreshEgress(){
 
 async function refreshLoaded(){
   try{
-    const d = await (await fetch('/api/loaded')).json();
+    const d = await (await api('/api/loaded')).json();
     const box = $('loaded');
     if(!d.loaded.length){ box.innerHTML='<div class="muted">nothing loaded</div>'; return; }
     box.innerHTML = d.loaded.map(m=>
@@ -309,7 +329,7 @@ async function refreshLoaded(){
 
 async function refreshReg(){
   try{
-    const d = await (await fetch('/api/health')).json();
+    const d = await (await api('/api/health')).json();
     $('reg').innerHTML = d.registry.map(m=>
       '<div class="row"><span>'+m.id+'</span><span>'+m.tag+'</span></div>'
     ).join('') + (d.ollama.up ? '' :
@@ -319,22 +339,51 @@ async function refreshReg(){
 
 $('warm').addEventListener('click', async ()=>{
   $('warm').disabled=true; $('warm').textContent='Warming…';
-  try{ await fetch('/api/warm',{method:'POST'}); }catch{}
+  try{ await api('/api/warm',{method:'POST'}); }catch{}
   $('warm').textContent='Warm models'; $('warm').disabled=false;
   refreshLoaded();
 });
 
 async function refreshDocs(){
   try{
-    const d = await (await fetch('/api/documents')).json();
+    const d = await (await api('/api/documents')).json();
     const box = $('docs');
-    if(!d.documents.length){ box.innerHTML = '<div class="muted">no documents</div>'; return; }
-    box.innerHTML = d.documents.slice(0,8).map(x=>{
+    if(!d.documents.length){ box.innerHTML = '<div class="muted">no documents visible to you</div>'; return; }
+    box.innerHTML = d.documents.slice(0,10).map(x=>{
       const size = x.bytes>1e6 ? (x.bytes/1e6).toFixed(1)+' MB' : Math.round(x.bytes/1024)+' KB';
-      return '<div class="row"><span title="'+x.filename+'">'+
-        (x.filename.length>22 ? x.filename.slice(0,20)+'…' : x.filename)+
-        '</span><span>'+x.chunks+' ch · '+size+'</span></div>';
-    }).join('') + '<div class="muted" style="margin-top:.3rem">total chunks: '+d.chunk_count+'</div>';
+      const label = x.filename.length>26 ? x.filename.slice(0,24)+'…' : x.filename;
+      return '<div class="row"><span title="'+x.filename+'"><b>'+label+'</b></span>'+
+             '<span>'+x.chunks+' ch · '+size+'</span></div>'+
+             '<div class="row" style="opacity:.7"><span>'+x.department+' · '+x.access_level+'</span>'+
+             '<span>'+(x.uploaded_by||'')+'</span></div>';
+    }).join('') + '<div class="muted" style="margin-top:.3rem">visible: '+d.documents.length+' / total: '+d.total_documents+' · chunks: '+d.chunk_count+'</div>';
+  }catch{}
+}
+
+async function refreshMe(){
+  try{
+    const me = await (await api('/api/me')).json();
+    ME = me;
+    $('who').textContent = me.name + ' · ' + me.role + '/' + me.department;
+    const deptSel = $('uploadDept');
+    deptSel.innerHTML = me.departments.map(d=>
+      '<option value="'+d+'"'+(d===me.department?' selected':'')+'>'+d+'</option>').join('');
+    const accSel = $('uploadAccess');
+    accSel.innerHTML = me.access_levels.map(a=>
+      '<option value="'+a+'"'+(a==='all'?' selected':'')+'>'+a+'</option>').join('');
+    if(me.is_admin){
+      $('adminCard').style.display = 'block';
+      refreshAdminUsers();
+    }
+  }catch{}
+}
+
+async function refreshAdminUsers(){
+  try{
+    const d = await (await api('/api/admin/users')).json();
+    $('userList').innerHTML = d.users.map(u=>
+      '<div class="row"><span><b>'+u.email+'</b></span><span>'+u.role+' · '+u.department+(u.disabled?' · off':'')+'</span></div>'
+    ).join('');
   }catch{}
 }
 
@@ -345,11 +394,14 @@ $('upload').addEventListener('change', async e => {
   status.textContent = 'ingesting '+f.name+'…';
   $('uploadBtn').disabled = true;
   try{
-    const body = new FormData(); body.append('file', f);
-    const r = await fetch('/api/ingest', {method:'POST', body});
+    const body = new FormData();
+    body.append('file', f);
+    body.append('department', $('uploadDept').value);
+    body.append('access_level', $('uploadAccess').value);
+    const r = await api('/api/ingest', {method:'POST', body});
     const d = await r.json();
     if(!r.ok){ status.textContent = 'error: '+(d.detail||r.status); }
-    else if(d.reused){ status.textContent = 'already ingested ('+d.doc_id+')'; }
+    else if(d.reused){ status.textContent = 'metadata updated for existing doc'; }
     else { status.textContent = 'ingested '+d.chunks+' chunks from '+d.pages+' pages'; }
     refreshDocs();
   }catch(err){ status.textContent = 'error: '+err.message; }
@@ -357,7 +409,12 @@ $('upload').addEventListener('change', async e => {
   $('upload').value = '';
 });
 
-refreshEgress(); refreshLoaded(); refreshReg(); refreshDocs();
+$('logout').addEventListener('click', async ()=>{
+  try{ await fetch('/api/logout', {method:'POST'}); }catch{}
+  window.location = '/login';
+});
+
+refreshMe().then(()=>{ refreshEgress(); refreshLoaded(); refreshReg(); refreshDocs(); });
 setInterval(refreshEgress, 3000);
 setInterval(refreshLoaded, 8000);
 </script>

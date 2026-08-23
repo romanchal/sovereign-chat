@@ -12,3 +12,7 @@ outputs/
 Thumbs.db
 .idea/
 .vscode/
+
+# Auth state — never commit
+data/users.yaml
+data/session_secret

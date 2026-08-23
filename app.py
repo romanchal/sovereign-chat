@@ -13,14 +13,19 @@ import re
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, UploadFile, File
-from fastapi.responses import StreamingResponse, FileResponse
+from fastapi import Depends, FastAPI, Form, HTTPException, Request, Response, UploadFile, File
+from fastapi.responses import StreamingResponse, FileResponse, RedirectResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 import egress
 import ingest as ingest_mod
 from audit import AuditLogger
+from auth import (
+    ACCESS_LEVELS, AuthContext, DEPARTMENTS, ROLES, SESSION_COOKIE,
+    User, UserStore, allowed_doc_ids, current_user, issue_cookie,
+    permits_doc, require_admin,
+)
 from ollama_client import OllamaClient
 from registry import Registry
 from router import Router
@@ -38,6 +43,19 @@ ollama = OllamaClient()
 sandbox = SandboxExecutor()
 audit = AuditLogger()
 store = Store()
+
+# Auth bootstrap. Fail loudly if the user store is empty and no bootstrap env
+# vars are set — otherwise the app would silently reject every login.
+users = UserStore()
+_created = users.bootstrap_admin_from_env()
+if _created:
+    print(f"[auth] bootstrapped admin: {_created.email}")
+if not users.all():
+    raise RuntimeError(
+        "no users configured. Set BOOTSTRAP_ADMIN_EMAIL and "
+        "BOOTSTRAP_ADMIN_PASSWORD env vars, then restart."
+    )
+AuthContext.store = users
 
 EMBED_MODEL_ID = "embed"
 EMBED_BATCH = 32
@@ -75,12 +93,60 @@ class ChatRequest(BaseModel):
 
 
 @app.get("/")
-async def index() -> FileResponse:
+async def index(request: Request):
+    # Guard the SPA at the edge so unauthenticated visitors never see it.
+    if not request.cookies.get(SESSION_COOKIE):
+        return RedirectResponse("/login", status_code=302)
+    from auth import verify_cookie
+    if not verify_cookie(request.cookies.get(SESSION_COOKIE, "")):
+        return RedirectResponse("/login", status_code=302)
     return FileResponse(BASE / "static" / "index.html")
 
 
+@app.get("/login")
+async def login_page() -> FileResponse:
+    return FileResponse(BASE / "static" / "login.html")
+
+
+class LoginPayload(BaseModel):
+    email: str
+    password: str
+
+
+@app.post("/api/login")
+async def api_login(payload: LoginPayload, response: Response) -> dict[str, Any]:
+    u = users.authenticate(payload.email, payload.password)
+    if not u:
+        audit.log("auth", payload.email, "login-fail", None)
+        raise HTTPException(401, "invalid email or password")
+    token = issue_cookie(u.email)
+    response.set_cookie(
+        SESSION_COOKIE, token,
+        httponly=True, samesite="lax", max_age=12 * 3600, path="/",
+    )
+    audit.log("auth", u.email, "login-ok", {"role": u.role, "department": u.department})
+    return {"email": u.email, "name": u.name, "role": u.role, "department": u.department}
+
+
+@app.post("/api/logout")
+async def api_logout(response: Response) -> dict[str, Any]:
+    response.delete_cookie(SESSION_COOKIE, path="/")
+    return {"ok": True}
+
+
+@app.get("/api/me")
+async def api_me(user: User = Depends(current_user)) -> dict[str, Any]:
+    return {
+        "email": user.email, "name": user.name,
+        "role": user.role, "department": user.department,
+        "is_admin": user.is_admin,
+        "roles": list(ROLES), "departments": list(DEPARTMENTS),
+        "access_levels": list(ACCESS_LEVELS),
+    }
+
+
 @app.get("/api/health")
-async def health() -> dict[str, Any]:
+async def health(user: User = Depends(current_user)) -> dict[str, Any]:
     return {
         "ollama": await ollama.health(),
         "registry": registry.as_list(),
@@ -90,38 +156,70 @@ async def health() -> dict[str, Any]:
 
 
 @app.get("/api/egress")
-async def egress_status() -> dict[str, Any]:
+async def egress_status(user: User = Depends(current_user)) -> dict[str, Any]:
     return egress.snapshot()
 
 
 @app.get("/api/loaded")
-async def loaded() -> dict[str, Any]:
+async def loaded(user: User = Depends(current_user)) -> dict[str, Any]:
     return {"loaded": await ollama.loaded_models()}
 
 
 @app.post("/api/warm")
-async def warm() -> dict[str, Any]:
+async def warm(user: User = Depends(current_user)) -> dict[str, Any]:
     tags = [m.ollama_tag for m in registry.models.values()]
     return {"warmed": await ollama.warm_all(tags)}
 
 
 @app.post("/api/reload-registry")
-async def reload_registry() -> dict[str, Any]:
+async def reload_registry(user: User = Depends(require_admin)) -> dict[str, Any]:
     registry.reload()
     return {"registry": registry.as_list()}
 
 
+# ────────────────────────────────────────────────────────── admin endpoints
+
+@app.get("/api/admin/users")
+async def admin_list_users(user: User = Depends(require_admin)) -> dict[str, Any]:
+    return {"users": [{
+        "email": u.email, "name": u.name, "role": u.role,
+        "department": u.department, "disabled": u.disabled,
+    } for u in users.all()]}
+
+
 @app.get("/api/documents")
-async def list_documents() -> dict[str, Any]:
-    return {"documents": store.list_documents(), "chunk_count": store.chunk_count()}
+async def list_documents(user: User = Depends(current_user)) -> dict[str, Any]:
+    """List only documents the current user is allowed to see."""
+    all_docs = store.list_documents()
+    visible = [d for d in all_docs if permits_doc(user, d)]
+    return {
+        "documents": visible,
+        "chunk_count": store.chunk_count(),
+        "total_documents": len(all_docs),
+    }
 
 
 @app.post("/api/ingest")
-async def ingest_file(file: UploadFile = File(...)) -> dict[str, Any]:
+async def ingest_file(
+    file: UploadFile = File(...),
+    department: str = Form("general"),
+    access_level: str = Form("all"),
+    user: User = Depends(current_user),
+) -> dict[str, Any]:
     """Read a file, chunk it, embed with nomic-embed-text, persist to LanceDB."""
     if not registry.has(EMBED_MODEL_ID):
         raise HTTPException(500, f"embed model '{EMBED_MODEL_ID}' not in registry")
     embed_spec = registry.get(EMBED_MODEL_ID)
+
+    department = (department or "general").lower()
+    access_level = (access_level or "all").lower()
+    if department not in DEPARTMENTS:
+        raise HTTPException(400, f"unknown department: {department}")
+    if access_level not in ACCESS_LEVELS:
+        raise HTTPException(400, f"unknown access_level: {access_level}")
+    # Employees can only upload to their own department (or 'general').
+    if not user.is_admin and department not in (user.department, "general"):
+        raise HTTPException(403, "cannot upload into another department")
 
     filename = Path(file.filename or "unnamed").name
     ext = Path(filename).suffix.lower()
@@ -137,9 +235,13 @@ async def ingest_file(file: UploadFile = File(...)) -> dict[str, Any]:
     stored.write_bytes(content)
 
     if store.has_doc(doc_id):
+        # Update metadata even on a re-upload — the uploader may want to move
+        # a doc between departments without re-embedding it.
+        store.set_meta(doc_id, department, access_level, user.email)
         return {
             "doc_id": doc_id, "filename": filename, "reused": True,
             "chunks": 0, "pages": 0,
+            "department": department, "access_level": access_level,
         }
 
     try:
@@ -170,12 +272,16 @@ async def ingest_file(file: UploadFile = File(...)) -> dict[str, Any]:
         size_bytes=len(content), pages=pages, chunk_count=len(rows),
         stored_path=stored,
     )
+    store.set_meta(doc_id, department, access_level, user.email)
     audit.log(embed_spec.ollama_tag, filename, "ingest", {
         "doc_id": doc_id, "chunks": len(rows), "pages": pages,
+        "department": department, "access_level": access_level,
+        "uploaded_by": user.email,
     })
     return {
         "doc_id": doc_id, "filename": filename, "reused": False,
         "chunks": len(rows), "pages": pages, "mime": mime,
+        "department": department, "access_level": access_level,
     }
 
 
@@ -268,18 +374,28 @@ async def _run_agent_loop(
 
 
 @app.post("/api/chat")
-async def chat(req: ChatRequest) -> StreamingResponse:
+async def chat(req: ChatRequest, user: User = Depends(current_user)) -> StreamingResponse:
     decision = router.classify(req.message, has_image=req.has_image)
     spec = registry.get(decision.model_id)
     is_coder = decision.model_id == "coder" and sandbox.available
 
-    # RAG decision: explicit grounded=True/False overrides; otherwise auto —
-    # ground when we have any indexed chunks AND we're not in the coder path.
+    # Compute the doc_id allowlist BEFORE retrieval — this is the RBAC gate.
+    all_docs = store.list_documents()
+    permitted_ids = set(allowed_doc_ids(user, all_docs))
+    if req.doc_ids:
+        requested = set(req.doc_ids)
+        denied = requested - permitted_ids
+        if denied:
+            raise HTTPException(403, f"not authorized for doc(s): {sorted(denied)}")
+        scope_ids: list[str] | None = sorted(requested)
+    else:
+        scope_ids = sorted(permitted_ids) if permitted_ids else []
+
     use_rag = False
     if retriever is not None and not is_coder:
         if req.grounded is True:
             use_rag = True
-        elif req.grounded is None and store.chunk_count() > 0:
+        elif req.grounded is None and store.chunk_count() > 0 and scope_ids:
             use_rag = True
 
     async def stream():
@@ -291,13 +407,14 @@ async def chat(req: ChatRequest) -> StreamingResponse:
         if use_rag:
             try:
                 result = await retriever.retrieve(
-                    req.message, k=RAG_TOP_K, allowed_doc_ids=req.doc_ids,
+                    req.message, k=RAG_TOP_K, allowed_doc_ids=scope_ids,
                 )
                 retrieved = result.hits
                 any_relevant = result.any_relevant
                 yield json.dumps({
                     "type": "citations",
                     "grounded": True,
+                    "scope": len(scope_ids) if scope_ids is not None else -1,
                     "hits": [{
                         "doc_id": h["doc_id"], "filename": h["filename"],
                         "page": h["page"], "score": round(h["score"], 3),
@@ -305,10 +422,12 @@ async def chat(req: ChatRequest) -> StreamingResponse:
                     "any_relevant": any_relevant,
                 }) + "\n"
                 audit.log(spec.ollama_tag, req.message, "retrieval", {
+                    "user": user.email,
                     "k": RAG_TOP_K,
                     "returned": len(retrieved),
                     "any_relevant": any_relevant,
-                    "doc_ids": req.doc_ids,
+                    "requested_doc_ids": req.doc_ids,
+                    "scope_ids": scope_ids,
                 })
             except Exception as exc:
                 audit.log(spec.ollama_tag, req.message, "retrieval-error", {"error": str(exc)})
