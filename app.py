@@ -15,19 +15,25 @@ from pathlib import Path
 from typing import Any
 
 
-def _load_dotenv(path: Path) -> None:
-    """Tiny .env loader. Zero deps. Skips comments/blank lines, honors quotes.
-    Env values already present in the process take precedence."""
+def _load_dotenv(path: Path) -> list[str]:
+    """Tiny .env loader. Zero deps. utf-8-sig strips a Notepad BOM. Env vars
+    already set in the process take precedence. Returns loaded keys."""
     if not path.exists():
-        return
-    for raw in path.read_text(encoding="utf-8").splitlines():
-        line = raw.strip()
+        print(f"[dotenv] no .env at {path}")
+        return []
+    loaded: list[str] = []
+    for raw in path.read_text(encoding="utf-8-sig").splitlines():
+        line = raw.strip().lstrip("﻿")
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, _, val = line.partition("=")
         key = key.strip()
         val = val.strip().strip('"').strip("'")
-        os.environ.setdefault(key, val)
+        if key and key not in os.environ:
+            os.environ[key] = val
+            loaded.append(key)
+    print(f"[dotenv] loaded {len(loaded)} key(s) from {path.name}: {loaded}")
+    return loaded
 
 
 _load_dotenv(Path(__file__).parent / ".env")
