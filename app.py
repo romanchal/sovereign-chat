@@ -9,9 +9,28 @@ Then open http://127.0.0.1:8000
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any
+
+
+def _load_dotenv(path: Path) -> None:
+    """Tiny .env loader. Zero deps. Skips comments/blank lines, honors quotes.
+    Env values already present in the process take precedence."""
+    if not path.exists():
+        return
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        key = key.strip()
+        val = val.strip().strip('"').strip("'")
+        os.environ.setdefault(key, val)
+
+
+_load_dotenv(Path(__file__).parent / ".env")
 
 from fastapi import Depends, FastAPI, Form, HTTPException, Request, Response, UploadFile, File
 from fastapi.responses import StreamingResponse, FileResponse, RedirectResponse, JSONResponse
@@ -52,8 +71,9 @@ if _created:
     print(f"[auth] bootstrapped admin: {_created.email}")
 if not users.all():
     raise RuntimeError(
-        "no users configured. Set BOOTSTRAP_ADMIN_EMAIL and "
-        "BOOTSTRAP_ADMIN_PASSWORD env vars, then restart."
+        "no users configured. Create .env from .env.example with "
+        "BOOTSTRAP_ADMIN_EMAIL / BOOTSTRAP_ADMIN_PASSWORD / BOOTSTRAP_ADMIN_NAME, "
+        "then restart. (Or export those env vars in the current shell.)"
     )
 AuthContext.store = users
 
