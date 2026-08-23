@@ -60,6 +60,14 @@
     color:var(--ink-3);margin-bottom:.15rem}
   .step pre{margin:.2rem 0 0;white-space:pre-wrap;word-wrap:break-word;color:var(--ink)}
 
+  .skeleton{display:inline-flex;gap:6px;align-items:center;color:var(--ink-3);
+    font-family:var(--mono);font-size:.78rem}
+  .skeleton .dot{width:6px;height:6px;border-radius:50%;background:var(--ink-3);
+    animation:blink 1.1s infinite ease-in-out}
+  .skeleton .dot:nth-child(2){animation-delay:.15s}
+  .skeleton .dot:nth-child(3){animation-delay:.30s}
+  @keyframes blink{0%,80%,100%{opacity:.25}40%{opacity:1}}
+
   form{display:flex;gap:.6rem;padding:.9rem 1.2rem;border-top:1px solid var(--line)}
   #q{flex:1;background:var(--sunk);border:1px solid var(--line);color:var(--ink);
     border-radius:6px;padding:.65rem .8rem;font-family:inherit;font-size:.95rem;resize:none}
@@ -157,9 +165,12 @@ $('f').addEventListener('submit', async e => {
   const b = el('msg bot','<div class="who">workbench</div>');
   const routeBox = el('routing','');
   routeBox.style.display='none';
+  const skel = el('skeleton','<span class="dot"></span><span class="dot"></span><span class="dot"></span><span style="margin-left:6px">thinking…</span>');
   const bub = el('bubble','');
-  b.appendChild(routeBox); b.appendChild(bub);
+  b.appendChild(routeBox); b.appendChild(skel); b.appendChild(bub);
   log.appendChild(b); scroll();
+
+  const hideSkel = () => { if(skel.parentNode) skel.remove(); };
 
   try{
     const res = await fetch('/api/chat',{
@@ -213,7 +224,7 @@ $('f').addEventListener('submit', async e => {
           const s = el('step out','<div class="lbl">sandbox output</div>');
           s.appendChild(pre); b.insertBefore(s, bub); scroll();
         }
-        else if(m.type==='token'){ bub.textContent += m.text; scroll(); }
+        else if(m.type==='token'){ hideSkel(); bub.textContent += m.text; scroll(); }
         else if(m.type==='stats'){
           $('stats').innerHTML =
             '<div class="row"><span>tokens</span><span>'+m.tokens+'</span></div>'+
@@ -222,11 +233,14 @@ $('f').addEventListener('submit', async e => {
           refreshLoaded();
         }
         else if(m.type==='error'){
+          hideSkel();
           bub.textContent += '\n\n[error] '+m.message;
         }
+        else if(m.type==='done'){ hideSkel(); }
       }
     }
   }catch(err){
+    hideSkel();
     bub.textContent += '\n\n[error] '+err.message;
   }
   $('send').disabled = false; $('q').focus();

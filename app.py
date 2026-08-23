@@ -172,7 +172,10 @@ async def _run_agent_loop(
 async def chat(req: ChatRequest) -> StreamingResponse:
     decision = router.classify(req.message, has_image=req.has_image)
     spec = registry.get(decision.model_id)
-    is_coder = decision.model_id == "coder"
+    # Only enter the agent loop when the coder route AND the sandbox is
+    # actually usable — otherwise the model just burns iterations against
+    # a broken tool and never produces a final answer.
+    is_coder = decision.model_id == "coder" and sandbox.available
 
     async def stream():
         yield json.dumps({"type": "routing", **decision.to_dict()}) + "\n"
