@@ -60,6 +60,13 @@
     color:var(--ink-3);margin-bottom:.15rem}
   .step pre{margin:.2rem 0 0;white-space:pre-wrap;word-wrap:break-word;color:var(--ink)}
 
+  .cites{border:1px solid var(--ok);background:rgba(53,177,132,.07);border-radius:6px;
+    padding:.5rem .75rem;margin:.4rem 0;max-width:74ch;font-family:var(--mono);font-size:.74rem}
+  .cites .hd{color:var(--ok);font-weight:600;letter-spacing:.08em;
+    text-transform:uppercase;font-size:.62rem;margin-bottom:.3rem}
+  .cites .item{display:flex;justify-content:space-between;gap:.6rem;color:var(--ink-2);padding:.1rem 0}
+  .cites .item b{color:var(--ink)}
+
   .skeleton{display:inline-flex;gap:6px;align-items:center;color:var(--ink-3);
     font-family:var(--mono);font-size:.78rem}
   .skeleton .dot{width:6px;height:6px;border-radius:50%;background:var(--ink-3);
@@ -217,6 +224,20 @@ $('f').addEventListener('submit', async e => {
             routeBox.innerHTML += '<br><span class="swap">already resident — no swap</span>';
           }
           scroll();
+        }
+        else if(m.type==='citations'){
+          const box = el('cites','<div class="hd">retrieved from knowledge base ('+m.hits.length+')</div>');
+          if(!m.hits.length){
+            box.innerHTML += '<div class="item"><span>no matching chunks</span></div>';
+          } else {
+            m.hits.forEach(h=>{
+              const it = el('item','');
+              it.innerHTML = '<span><b>'+h.filename+'</b>'+(h.page?' · p.'+h.page:'')+'</span>'+
+                             '<span>dist '+h.score+'</span>';
+              box.appendChild(it);
+            });
+          }
+          b.insertBefore(box, bub); scroll();
         }
         else if(m.type==='plan'){
           const s = el('step plan',

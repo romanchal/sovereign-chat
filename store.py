@@ -167,6 +167,51 @@ class Store:
             "ingested_at": r["ingested_at"],
         } for r in rows]
 
+    def doc_lookup(self, doc_ids: list[str]) -> dict[str, dict[str, Any]]:
+        """Fetch document metadata for a set of doc_ids (single query)."""
+        if not doc_ids:
+            return {}
+        try:
+            uniq = list(set(doc_ids))
+            clause = " OR ".join(f"doc_id = '{d}'" for d in uniq)
+            rows = self._docs.search().where(clause).limit(len(uniq)).to_list()
+        except Exception:
+            return {}
+        return {r["doc_id"]: r for r in rows}
+
+    def search(
+        self,
+        vector: list[float],
+        k: int = 5,
+        allowed_doc_ids: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Vector search chunks. Optionally restrict to a doc_id allowlist."""
+        if self._chunks is None or not vector:
+            return []
+        q = self._chunks.search(vector).limit(k)
+        if allowed_doc_ids is not None:
+            if not allowed_doc_ids:
+                return []
+            clause = " OR ".join(f"doc_id = '{d}'" for d in allowed_doc_ids)
+            q = q.where(clause, prefilter=True)
+        try:
+            hits = q.to_list()
+        except Exception:
+            return []
+        docs = self.doc_lookup([h["doc_id"] for h in hits])
+        out: list[dict[str, Any]] = []
+        for h in hits:
+            meta = docs.get(h["doc_id"], {})
+            out.append({
+                "chunk_id": h.get("id"),
+                "doc_id": h.get("doc_id"),
+                "filename": meta.get("filename", "unknown"),
+                "page": int(h.get("page") or 0),
+                "text": h.get("text") or "",
+                "score": float(h.get("_distance", 0.0)),
+            })
+        return out
+
     def chunk_count(self) -> int:
         if self._chunks is None:
             return 0

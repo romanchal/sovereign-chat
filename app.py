@@ -24,6 +24,7 @@ from audit import AuditLogger
 from ollama_client import OllamaClient
 from registry import Registry
 from router import Router
+from retriever import Retriever, build_grounded_prompt
 from sandbox import SandboxExecutor, get_tools_schema
 from store import ChunkRow, Store, UPLOADS_DIR
 
@@ -40,12 +41,17 @@ store = Store()
 
 EMBED_MODEL_ID = "embed"
 EMBED_BATCH = 32
+RAG_TOP_K = 5
+
+_embed_spec = registry.get(EMBED_MODEL_ID) if registry.has(EMBED_MODEL_ID) else None
+retriever = Retriever(store, ollama, _embed_spec.ollama_tag) if _embed_spec else None
 
 SYSTEM_PROMPT = (
-    "You are an on-premise assistant for an industrial refinery. "
-    "All data you see is confidential and never leaves this machine. "
-    "Be precise and concise. When you are not certain, say so plainly "
-    "rather than guessing."
+    "You are an on-premise assistant for MRPL. "
+    "Answer precisely; when unsure, say so plainly rather than guessing. "
+    "The application (not you) makes access decisions — do not invent your own "
+    "confidentiality policy or refuse to answer legitimate questions about data "
+    "the application has already shown you."
 )
 
 CODER_SYSTEM_PROMPT = (
@@ -64,6 +70,8 @@ FENCE_RE = re.compile(r"```python\s*\n(.*?)\n```", re.DOTALL)
 class ChatRequest(BaseModel):
     message: str
     has_image: bool = False
+    grounded: bool | None = None       # None = auto (RAG if any docs ingested)
+    doc_ids: list[str] | None = None   # explicit document selection
 
 
 @app.get("/")
@@ -263,23 +271,65 @@ async def _run_agent_loop(
 async def chat(req: ChatRequest) -> StreamingResponse:
     decision = router.classify(req.message, has_image=req.has_image)
     spec = registry.get(decision.model_id)
-    # Only enter the agent loop when the coder route AND the sandbox is
-    # actually usable — otherwise the model just burns iterations against
-    # a broken tool and never produces a final answer.
     is_coder = decision.model_id == "coder" and sandbox.available
+
+    # RAG decision: explicit grounded=True/False overrides; otherwise auto —
+    # ground when we have any indexed chunks AND we're not in the coder path.
+    use_rag = False
+    if retriever is not None and not is_coder:
+        if req.grounded is True:
+            use_rag = True
+        elif req.grounded is None and store.chunk_count() > 0:
+            use_rag = True
 
     async def stream():
         yield json.dumps({"type": "routing", **decision.to_dict()}) + "\n"
 
+        # Retrieve BEFORE the model swap so the citations frame lands early.
+        retrieved: list[dict[str, Any]] = []
+        any_relevant = False
+        if use_rag:
+            try:
+                result = await retriever.retrieve(
+                    req.message, k=RAG_TOP_K, allowed_doc_ids=req.doc_ids,
+                )
+                retrieved = result.hits
+                any_relevant = result.any_relevant
+                yield json.dumps({
+                    "type": "citations",
+                    "grounded": True,
+                    "hits": [{
+                        "doc_id": h["doc_id"], "filename": h["filename"],
+                        "page": h["page"], "score": round(h["score"], 3),
+                    } for h in retrieved],
+                    "any_relevant": any_relevant,
+                }) + "\n"
+                audit.log(spec.ollama_tag, req.message, "retrieval", {
+                    "k": RAG_TOP_K,
+                    "returned": len(retrieved),
+                    "any_relevant": any_relevant,
+                    "doc_ids": req.doc_ids,
+                })
+            except Exception as exc:
+                audit.log(spec.ollama_tag, req.message, "retrieval-error", {"error": str(exc)})
+                yield json.dumps({"type": "error", "message": f"retrieval failed: {exc}"}) + "\n"
+
         swap = await ollama.ensure_loaded(spec.ollama_tag)
         yield json.dumps({"type": "swap", **swap}) + "\n"
 
-        system = CODER_SYSTEM_PROMPT if is_coder else SYSTEM_PROMPT
+        if is_coder:
+            system = CODER_SYSTEM_PROMPT
+        elif use_rag:
+            system = build_grounded_prompt(retrieved)
+        else:
+            system = SYSTEM_PROMPT
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": system},
             {"role": "user", "content": req.message},
         ]
-        audit.log(spec.ollama_tag, req.message, "route", decision.to_dict())
+        audit.log(spec.ollama_tag, req.message, "route", {
+            **decision.to_dict(), "use_rag": use_rag, "chunk_count": len(retrieved),
+        })
 
         try:
             skip_stream = False
